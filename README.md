@@ -1,10 +1,9 @@
 # FDTD
 Baby level FDTD solver that literally does nothing.
 
-Also a fun fact: if you use it to simulate a high Q stuff like 
-photonic donut resonant idk with Q=10^11, you can expect it to 
-finish between after the viva of your PhD and after the heat
-death of the universe.
+Also a fun fact: if you use it to simulate a high Q stuff like photonic 
+donut resonator idk with Q=10^11, you can expect it to finish between 
+after the viva of your PhD and after the heat death of the universe.
 
 ⠀⠀⠀⠀⠀⠀⠀⠀⢀⠞⠀⢀⡤⠂⢀⣀⠄⠂⠀⠀⠀⠀⠀⠀⠠⠂⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⠀⠀⠀⠀⠈⠀⠊⠐⠢⣀⠈⢣⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⡠⠕⢠⠞⢁⡤⠒⠁⠀⠀⠀⠀⠀⢀⠠⠂⠁⠀⠀⠀⠀⠀⠀⢀⠔⠀⠀⠀⠀⠀⠀⠈⠈⠄⡀⠀⠀⠀⠀⠁⠈⠳⣀⡱⡀⠀⠀⠀⠀⠀⠐⠈⠁⠐⡁⠀⠀⠀
