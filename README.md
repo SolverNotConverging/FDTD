@@ -1,0 +1,2 @@
+# FDTD
+Baby level FDTD solver that literally does nothing.
