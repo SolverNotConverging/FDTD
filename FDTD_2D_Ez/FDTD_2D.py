@@ -7,7 +7,7 @@ from tqdm import tqdm
 class FDTD_2D:
     """
     2D TMz FDTD with:
-      • multiple sources (point, line-soft, SF/TF)
+      • multiple sources (point, line-soft, SF/TF, modal waveguide ports)
       • PML (sigma profiles on edges)
       • save/load state (.npz) including multi-source + PML settings
       • animation that marks sources (red) and PML (black, alpha=0.3)
@@ -532,6 +532,72 @@ class FDTD_2D:
 
         return np.asarray(Ez_modes), np.asarray(Hx_modes), np.asarray(n_eff, dtype=float)
 
+    def _wg_modes_x(self, iy0, iy1, ix, f_center, num_modes=4, guess=None, amplitude=1.0):
+        import numpy as np
+        from scipy.sparse import diags as spdiags
+        from scipy.sparse.linalg import eigs
+
+        lo, hi = (min(iy0, iy1), max(iy0, iy1))
+        Ny = int(max(1, hi - lo))
+        if Ny < 2:
+            raise ValueError("waveguide-x: y-span too small; need at least 2 cells.")
+
+        k0 = 2.0 * np.pi * float(f_center) / self.c0
+        dy = self.dy
+
+        ER_vec = np.asarray(self.ERzz[ix, lo:hi], dtype=float)
+        MRxx_vec = np.asarray(self.MRxx[ix, lo:hi], dtype=float)
+        MRyy_vec = np.asarray(self.MRyy[ix, lo:hi], dtype=float)
+
+        ERzz_diag = spdiags(ER_vec, 0, shape=(Ny, Ny))
+        MRxx_inv = spdiags(1.0 / MRxx_vec, 0, shape=(Ny, Ny))
+        MRyy_inv = spdiags(1.0 / MRyy_vec, 0, shape=(Ny, Ny))
+
+        d_plus = np.ones(Ny)
+        d_minus = -np.ones(Ny)
+        DEY = spdiags([d_plus, d_minus], [1, 0], shape=(Ny, Ny)) / (dy * k0)
+        DHY = spdiags([d_plus, d_minus], [0, -1], shape=(Ny, Ny)) / (dy * k0)
+
+        A = ERzz_diag + DHY @ (MRyy_inv @ DEY)
+        B = MRxx_inv
+
+        if guess is None:
+            n_slice = np.sqrt(ER_vec * 0.5 * (MRxx_vec + MRyy_vec))
+            n_guess = float(np.max(n_slice))
+            guess = max(n_guess ** 2, 1.0)
+
+        k = int(max(1, num_modes))
+        evals, evecs = eigs(A, M=B, k=k, sigma=guess)
+
+        n_eff = np.sqrt(np.maximum(evals.real, 0.0))
+        order = np.argsort(-n_eff)
+        evecs = evecs[:, order]
+        n_eff = n_eff[order]
+
+        Ez_modes = []
+        Hy_modes = []
+
+        for m in range(evecs.shape[1]):
+            Ez = evecs[:, m]
+
+            kmax = np.argmax(np.abs(Ez))
+            phase = np.angle(Ez[kmax])
+            Ez = (Ez * np.exp(-1j * phase)).real
+
+            Ez = Ez / (np.max(np.abs(Ez)) + 1e-30)
+
+            Hy = -(n_eff[m]) * (MRyy_inv @ Ez)
+            Hy = Hy.A.squeeze() if hasattr(Hy, "A") else np.asarray(Hy).squeeze()
+            Hy = Hy.real
+
+            Ez_modes.append(Ez)
+            Hy_modes.append(Hy)
+
+        Ez_modes = np.asarray(Ez_modes)
+        Hy_modes = np.asarray(Hy_modes)
+
+        return np.asarray(Ez_modes), np.asarray(Hy_modes), np.asarray(n_eff, dtype=float)
+
     # ---------- public API: add_source ----------
     def add_source(self, kind, x, y, amplitude=1.0, t0=None, tw=None, f_min=None, f_max=None, mode_index=1,
                    modes_to_show=4, eig_guess=None, is_show=True, ):
@@ -540,18 +606,20 @@ class FDTD_2D:
         Add a source.
 
         kind:
-          'point'     : soft point into Dz at (x,y)
-          'line-soft' : soft line into Dz; give x=(ix0,ix1) & y=j or y=(j0,j1) & x=i
-          'sftf-x'    : TF/SF boundary with **normal along x**  → vertical line at fixed x, spanning y
-          'sftf-y'    : TF/SF boundary with **normal along y**  → horizontal line at fixed y, spanning x
+          'point'       : soft point into Dz at (x,y)
+          'line-soft'   : soft line into Dz; give x=(ix0,ix1) & y=j or y=(j0,j1) & x=i
+          'sftf-x'      : TF/SF boundary with **normal along x**  → vertical line at fixed x, spanning y
+          'sftf-y'      : TF/SF boundary with **normal along y**  → horizontal line at fixed y, spanning x
+          'waveguide-x' : modal source on a vertical slice injecting toward +x
+          'waveguide-y' : modal source on a horizontal slice injecting toward +y
         x, y:
           Either ints (indices) or floats (meters). For spans, pass (start, end).
            num_modes, mode_index and guess are used only for 'waveguide' mode
         """
 
         k = kind.lower()
-        if k not in ('point', 'line-soft', 'sftf-x', 'sftf-y', 'waveguide-y'):
-            raise ValueError("kind must be 'point', 'line-soft', 'sftf-x', 'sftf-y', 'waveguide-y'.")
+        if k not in ('point', 'line-soft', 'sftf-x', 'sftf-y', 'waveguide-x', 'waveguide-y'):
+            raise ValueError("kind must be 'point', 'line-soft', 'sftf-x', 'sftf-y', 'waveguide-x', 'waveguide-y'.")
 
         # normalize frequency parameters
         fmin = f_min if f_min is not None else self.f_min
@@ -683,6 +751,61 @@ class FDTD_2D:
             mi = min(mi, Ez_modes.shape[0] - 1)
             s['Ez_src'] = Ez_modes[mi]
             s['Hx_src'] = Hx_modes[mi]
+            s['n_eff'] = float(n_effs[mi])
+
+        # --- waveguide port (vertical, normal = x) ---
+        elif k == 'waveguide-x':
+            lo, hi = (min(iy0, iy1), max(iy0, iy1))
+            ix_line = ix0
+            if f_min is not None and f_max is not None:
+                f_center = 0.5 * (f_min + f_max)
+            elif f_max is not None:
+                f_center = f_max
+            else:
+                f_center = self.f_max
+
+            Ez_modes, Hy_modes, n_effs = self._wg_modes_x(
+                lo, hi, ix_line, f_center,
+                num_modes=max(1, int(modes_to_show)),
+                guess=eig_guess, amplitude=float(amplitude)
+            )
+
+            if is_show:
+                import matplotlib.pyplot as plt
+                y_axis = (np.arange(lo, hi) + 0.5) * self.dy
+
+                rows = min(Ez_modes.shape[0], int(modes_to_show))
+                fig, axs = plt.subplots(rows, 1, figsize=(8, 2.6 * rows), sharex=True)
+                if rows == 1:
+                    axs = [axs]
+
+                for m in range(rows):
+                    ax1 = axs[m]
+                    ax2 = ax1.twinx()
+                    ax1.plot(y_axis, Ez_modes[m], linewidth=1.6, label='Ez')
+                    ax2.plot(y_axis, Hy_modes[m], linestyle='--', linewidth=1.2, label='Hy')
+
+                    ax1.set_ylabel('Ez (arb.)')
+                    ax2.set_ylabel('Hy (arb.)')
+                    ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
+                    ax1.grid(True, alpha=0.25)
+
+                    lines, labels = [], []
+                    for a in (ax1, ax2):
+                        l, lab = a.get_legend_handles_labels()
+                        lines += l
+                        labels += lab
+                    ax1.legend(lines, labels, loc='upper right')
+
+                axs[-1].set_xlabel('y (m)')
+                fig.suptitle(f'waveguide-x port at x={ix_line}')
+                fig.tight_layout()
+                plt.show()
+
+            mi = max(1, int(mode_index)) - 1
+            mi = min(mi, Ez_modes.shape[0] - 1)
+            s['Ez_src'] = Ez_modes[mi]
+            s['Hy_src'] = Hy_modes[mi]
             s['n_eff'] = float(n_effs[mi])
 
         self.sources.append(s)
@@ -834,6 +957,14 @@ class FDTD_2D:
                     for i in range(lo, hi):
                         if 0 <= y - 1 < self.Ny:
                             self.CEx[i, y - 1] += (1.0 / self.dy) * E_src * s["Ez_src"][i - lo]
+                elif s['kind'] == 'waveguide-x':
+                    x = s["ix0"]
+                    j0, j1 = s["iy0"], s["iy1"]
+                    lo, hi = (min(j0, j1), max(j0, j1))
+                    E_src = self._g(s, t_index * self.dt)
+                    for j in range(lo, hi):
+                        if 0 <= x - 1 < self.Nx:
+                            self.CEy[x - 1, j] -= (1.0 / self.dx) * E_src * s["Ez_src"][j - lo]
 
             # integrate CE and update H
             self.calculate_ICE()
@@ -872,6 +1003,15 @@ class FDTD_2D:
                     for i in range(lo, hi):
                         if 0 <= y < self.Ny:
                             self.CHz[i, y] -= (1.0 / self.dy) * H_src * s["Hx_src"][i - lo]
+                elif s["kind"] == 'waveguide-x':
+                    n_eff = s["n_eff"]
+                    H_src = -self._g(s, t_index * self.dt + self.dx * n_eff / (2 * self.c0) + self.dt / 2.0)
+                    x = s["ix0"]
+                    j0, j1 = s["iy0"], s["iy1"]
+                    lo, hi = (min(j0, j1), max(j0, j1))
+                    for j in range(lo, hi):
+                        if 0 <= x < self.Nx:
+                            self.CHz[x, j] += (1.0 / self.dx) * H_src * s["Hy_src"][j - lo]
 
             # integrate CH and update D
             self.calculate_ID()
@@ -1393,7 +1533,7 @@ class FDTD_2D:
                                                                                               np.floating) else a
 
         # ---- sources table: [kind_code, ix0, ix1, iy0, iy1, amp, t0, tw, fmin, fmax]
-        kind_code_map = {'point': 0, 'line-soft': 1, 'sftf-x': 2, 'sftf-y': 3, 'waveguide-y': 4}
+        kind_code_map = {'point': 0, 'line-soft': 1, 'sftf-x': 2, 'sftf-y': 3, 'waveguide-y': 4, 'waveguide-x': 5}
         src_mat = np.zeros((len(self.sources), 10), dtype=np.float64)
         for i, s in enumerate(self.sources):
             src_mat[i, 0] = kind_code_map.get(s["kind"], 0)
@@ -1407,10 +1547,10 @@ class FDTD_2D:
             src_mat[i, 8] = (-1.0 if s["f_min"] is None else float(s["f_min"]))
             src_mat[i, 9] = s["f_max"]
 
-        # ---- waveguide-y blobs (optional, only for those sources that have profiles)
-        wg_meta = []  # rows: [src_index, offset, length, n_eff]
-        ez_blob = []
-        hx_blob = []
+        # ---- waveguide blobs (optional, only for those sources that have profiles)
+        wgY_meta = []  # rows: [src_index, offset, length, n_eff]
+        wgY_ez_blob = []
+        wgY_hx_blob = []
         offset = 0
         for idx, s in enumerate(self.sources):
             if s.get("kind") == "waveguide-y" and ("Ez_src" in s) and ("Hx_src" in s):
@@ -1418,14 +1558,33 @@ class FDTD_2D:
                 hx = np.asarray(s["Hx_src"], dtype=dtype).ravel()
                 L = int(min(len(ez), len(hx)))
                 if L > 0:
-                    ez_blob.append(ez[:L])
-                    hx_blob.append(hx[:L])
+                    wgY_ez_blob.append(ez[:L])
+                    wgY_hx_blob.append(hx[:L])
                     neff = float(s.get("n_eff", np.nan))
-                    wg_meta.append([idx, offset, L, neff])
+                    wgY_meta.append([idx, offset, L, neff])
                     offset += L
-        wg_meta = np.asarray(wg_meta, dtype=np.float64)
-        wg_ez = (np.concatenate(ez_blob).astype(dtype) if len(ez_blob) else np.array([], dtype=dtype))
-        wg_hx = (np.concatenate(hx_blob).astype(dtype) if len(hx_blob) else np.array([], dtype=dtype))
+        wgY_meta = np.asarray(wgY_meta, dtype=np.float64)
+        wgY_ez = (np.concatenate(wgY_ez_blob).astype(dtype) if len(wgY_ez_blob) else np.array([], dtype=dtype))
+        wgY_hx = (np.concatenate(wgY_hx_blob).astype(dtype) if len(wgY_hx_blob) else np.array([], dtype=dtype))
+
+        wgX_meta = []
+        wgX_ez_blob = []
+        wgX_hy_blob = []
+        offset = 0
+        for idx, s in enumerate(self.sources):
+            if s.get("kind") == "waveguide-x" and ("Ez_src" in s) and ("Hy_src" in s):
+                ez = np.asarray(s["Ez_src"], dtype=dtype).ravel()
+                hy = np.asarray(s["Hy_src"], dtype=dtype).ravel()
+                L = int(min(len(ez), len(hy)))
+                if L > 0:
+                    wgX_ez_blob.append(ez[:L])
+                    wgX_hy_blob.append(hy[:L])
+                    neff = float(s.get("n_eff", np.nan))
+                    wgX_meta.append([idx, offset, L, neff])
+                    offset += L
+        wgX_meta = np.asarray(wgX_meta, dtype=np.float64)
+        wgX_ez = (np.concatenate(wgX_ez_blob).astype(dtype) if len(wgX_ez_blob) else np.array([], dtype=dtype))
+        wgX_hy = (np.concatenate(wgX_hy_blob).astype(dtype) if len(wgX_hy_blob) else np.array([], dtype=dtype))
 
         # ---- periodic flags as a tiny array of strings (e.g., ['x','y'])
         periodic_arr = np.array(self.periodic, dtype='<U1')
@@ -1463,10 +1622,13 @@ class FDTD_2D:
             "sources": src_mat,
             "avg_freqs": np.array(self.avg_freqs, dtype=np.float64),
 
-            # waveguide-y extras
-            "wg_meta": wg_meta,  # shape (Nw, 4) columns: [src_index, offset, length, n_eff]
-            "wg_Ez_blob": wg_ez,  # concatenated Ez_src for all waveguide-y sources
-            "wg_Hx_blob": wg_hx,  # concatenated Hx_src for all waveguide-y sources
+            # waveguide extras
+            "wg_meta": wgY_meta,  # legacy key for waveguide-y sources
+            "wg_Ez_blob": wgY_ez,
+            "wg_Hx_blob": wgY_hx,
+            "wgx_meta": wgX_meta,
+            "wgx_Ez_blob": wgX_ez,
+            "wgx_Hy_blob": wgX_hy,
 
             # field histories (optional)
             "Hx_history": cast(getattr(self, "Hx_history", np.array([]))),
@@ -1548,7 +1710,7 @@ class FDTD_2D:
         sim.avg_freqs = list(np.array(data["avg_freqs"], dtype=float)) if "avg_freqs" in data.files else []
         if "sources" in data.files:
             mat = np.array(data["sources"])
-            kind_map = {0: 'point', 1: 'line-soft', 2: 'sftf-x', 3: 'sftf-y', 4: 'waveguide-y'}
+            kind_map = {0: 'point', 1: 'line-soft', 2: 'sftf-x', 3: 'sftf-y', 4: 'waveguide-y', 5: 'waveguide-x'}
             for row in mat:
                 s = dict(
                     kind=kind_map.get(int(row[0]), 'point'),
@@ -1565,13 +1727,29 @@ class FDTD_2D:
             meta = np.array(data["wg_meta"])
             ez_blob = np.array(data["wg_Ez_blob"])
             hx_blob = np.array(data["wg_Hx_blob"])
-            for src_index, offset, length, n_eff in meta.astype(int):
-                off = int(offset)
-                L = int(length)
-                s = sim.sources[int(src_index)]
+            for row in meta:
+                src_index = int(row[0])
+                off = int(row[1])
+                L = int(row[2])
+                neff = float(row[3])
+                s = sim.sources[src_index]
                 s["Ez_src"] = ez_blob[off:off + L]
                 s["Hx_src"] = hx_blob[off:off + L]
-                s["n_eff"] = float(n_eff)
+                s["n_eff"] = neff
+
+        if "wgx_meta" in data.files and data["wgx_meta"].size:
+            meta = np.array(data["wgx_meta"])
+            ez_blob = np.array(data["wgx_Ez_blob"])
+            hy_blob = np.array(data["wgx_Hy_blob"])
+            for row in meta:
+                src_index = int(row[0])
+                off = int(row[1])
+                L = int(row[2])
+                neff = float(row[3])
+                s = sim.sources[src_index]
+                s["Ez_src"] = ez_blob[off:off + L]
+                s["Hy_src"] = hy_blob[off:off + L]
+                s["n_eff"] = neff
 
         # field histories (optional)
         for name in ("Hx_history", "Hy_history", "Ez_history", "Dz_history"):
