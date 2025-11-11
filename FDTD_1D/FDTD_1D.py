@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -34,14 +36,11 @@ class FDTD_1D:
         self.src_tw = None
         self.avg_freq = None
 
-        self.left_perfect_boundary = False
-        self.right_perfect_boundary = False
-        self.h3 = 0
-        self.h2 = 0
-        self.h1 = 0
-        self.e3 = 0
-        self.e2 = 0
-        self.e1 = 0
+        self.left_absorbing_boundary = False
+        self.right_absorbing_boundary = False
+
+        self.ey_past = 0
+        self.hx_past = 0
 
         self.Nf = min(100, Nt)
         self.REF = np.zeros(self.Nf, dtype=complex)
@@ -56,25 +55,71 @@ class FDTD_1D:
         for nz in range(0, self.Nz - 1):
             self.Hx[nz] += self.mHx[nz] * (self.Ey[nz + 1] - self.Ey[nz]) / self.dz
 
-        if self.right_perfect_boundary is False:
+        if self.right_absorbing_boundary is not True:
             self.Hx[self.Nz - 1] += self.mHx[self.Nz - 1] * (-self.Ey[self.Nz - 1]) / self.dz
         else:
-            self.e3 = self.e2
-            self.e2 = self.e1
-            self.e1 = self.Ey[self.Nz - 1]
-            self.Hx[self.Nz - 1] += self.mHx[self.Nz - 1] * (self.e3 - self.Ey[self.Nz - 1]) / self.dz
+            S = self.c0 * self.dt / (self.dz * np.sqrt(self.ER[self.Nz - 1] * self.MR[self.Nz - 1]))
+            self.Hx[self.Nz - 1] = self.hx_past + (S - 1) / (S + 1) * (self.Hx[self.Nz - 2] - self.Hx[self.Nz - 1])
+            self.hx_past = self.Hx[self.Nz - 2]
 
     def E_Update(self):
         for nz in range(1, self.Nz):
             self.Ey[nz] += self.mEy[nz] * (self.Hx[nz] - self.Hx[nz - 1]) / self.dz
 
-        if self.left_perfect_boundary is False:
+        if self.left_absorbing_boundary is not True:
             self.Ey[0] += self.mEy[0] * self.Hx[0] / self.dz
         else:
-            self.h3 = self.h2
-            self.h2 = self.h1
-            self.h1 = self.Hx[0]
-            self.Ey[0] += self.mEy[0] * (self.Hx[0] - self.h3) / self.dz
+            S = self.c0 * self.dt / (self.dz * np.sqrt(self.ER[0] * self.MR[0]))
+            self.Ey[0] = self.ey_past + (S - 1) / (S + 1) * (self.Ey[1] - self.Ey[0])
+            self.ey_past = self.Ey[1]
+
+    def _indices_from_z(self, z_start, z_end):
+        i0 = int(np.clip(np.round(z_start / self.dz), 0, self.Nz - 1))
+        i1 = int(np.clip(np.round(z_end / self.dz), 0, self.Nz))
+        if i1 < i0:
+            i0, i1 = i1, i0
+        return slice(i0, i1)
+
+    def add_object(self, ER, MR, region):
+        """
+        region: either
+          - Python slice of indices (existing behavior), e.g., slice(30, 40)
+          - Tuple/list of absolute positions in meters, (z_start, z_end)
+        """
+        if isinstance(region, slice):
+            sl = region
+        elif isinstance(region, (tuple, list)) and len(region) == 2:
+            z0, z1 = float(region[0]), float(region[1])
+            sl = self._indices_from_z(z0, z1)
+        else:
+            raise TypeError("region must be a slice or a (z_start, z_end) tuple in meters.")
+        self.ER[sl] = ER
+        self.MR[sl] = MR
+
+    def set_boundary(self, left: str = "absorbing", right: str = "absorbing"):
+        valid = {"absorbing", "a", "electric", "e", "magnetic", "m"}
+        if left not in valid or right not in valid:
+            raise ValueError("Boundary must be one of {'absorbing' / 'a', 'electric' / 'e' ,'magnetic' / 'm'}")
+
+        # Apply electric/magnetic extremes to boundary cells
+        if left == "electric" or left == "e":
+            self.ER[0] = 1e8
+            self.left_absorbing_boundary = False
+        elif left == "magnetic" or left == "m":
+            self.MR[0] = 1e8
+            self.left_absorbing_boundary = False
+
+        else:
+            self.left_absorbing_boundary = True
+
+        if right == "electric" or right == "e":
+            self.ER[-1] = 1e8
+            self.right_absorbing_boundary = False
+        elif right == "magnetic" or right == "m":
+            self.MR[-1] = 1e8
+            self.right_absorbing_boundary = False
+        else:
+            self.right_absorbing_boundary = True
 
     def add_source(self, src_position, amplitude=1.0, t0=None, tw=None, is_show=True):
         if isinstance(src_position, int):
@@ -118,30 +163,7 @@ class FDTD_1D:
             plt.tight_layout()
             plt.show()
 
-    def _indices_from_z(self, z_start, z_end):
-        i0 = int(np.clip(np.round(z_start / self.dz), 0, self.Nz - 1))
-        i1 = int(np.clip(np.round(z_end / self.dz), 0, self.Nz))
-        if i1 < i0:
-            i0, i1 = i1, i0
-        return slice(i0, i1)
-
-    def add_object(self, ER, MR, region):
-        """
-        region: either
-          - Python slice of indices (existing behavior), e.g., slice(30, 40)
-          - Tuple/list of absolute positions in meters, (z_start, z_end)
-        """
-        if isinstance(region, slice):
-            sl = region
-        elif isinstance(region, (tuple, list)) and len(region) == 2:
-            z0, z1 = float(region[0]), float(region[1])
-            sl = self._indices_from_z(z0, z1)
-        else:
-            raise TypeError("region must be a slice or a (z_start, z_end) tuple in meters.")
-        self.ER[sl] = ER
-        self.MR[sl] = MR
-
-    def pulse(self, t):
+    def _pulse(self, t) -> float | Any:
         return self.src_amplitude * np.exp(-((t - self.src_t0) / self.src_tw) ** 2)
 
     def run(self):
@@ -156,12 +178,16 @@ class FDTD_1D:
         fn = np.linspace(0, self.f_max, self.Nf)
         Kn = np.exp(-1j * 2 * np.pi * fn * self.dt)
 
+        C_REF = np.sqrt(np.sqrt(self.MR[1] / self.ER[1]))
+        C_TRN = np.sqrt(np.sqrt(self.MR[-2] / self.ER[-2]))
+        C_SRC = np.sqrt(np.sqrt(self.MR[self.src_index] / self.ER[self.src_index]))
+
         # Add tqdm progress bar around the loop
         for t_index in tqdm(range(self.Nt), desc="Running simulation", unit="step"):
             self.H_Update()
 
             if self.src_index is not None:
-                Ey_src = self.pulse(t_index * self.dt)
+                Ey_src = self._pulse(t_index * self.dt)
                 self.Hx[self.src_index - 1] -= self.mHx[self.src_index - 1] / self.dz * Ey_src
 
             self.E_Update()
@@ -169,15 +195,15 @@ class FDTD_1D:
             if self.src_index is not None:
                 EtaR_inv = np.sqrt(self.ER[self.src_index] / self.MR[self.src_index])
                 n = np.sqrt(self.ER[self.src_index] * self.MR[self.src_index])
-                Hx_src = -EtaR_inv * self.pulse(
+                Hx_src = -EtaR_inv * self._pulse(
                     t_index * self.dt + n * self.dz / (2 * self.c0) + self.dt / 2
                 )
                 self.Ey[self.src_index] -= self.mEy[self.src_index] / self.dz * Hx_src
 
             for nf in range(self.Nf):
-                self.REF[nf] += self.dt * Kn[nf] ** t_index * self.Ey[0]
-                self.TRN[nf] += self.dt * Kn[nf] ** t_index * self.Ey[-1]
-                self.SRC[nf] += self.dt * Kn[nf] ** t_index * self.pulse(t_index * self.dt)
+                self.REF[nf] += self.dt * Kn[nf] ** t_index * self.Ey[1] / C_REF
+                self.TRN[nf] += self.dt * Kn[nf] ** t_index * self.Ey[-2] / C_TRN
+                self.SRC[nf] += self.dt * Kn[nf] ** t_index * self._pulse(t_index * self.dt) / C_SRC
 
             Hx_history[t_index, :] = self.Hx.copy()
             Ey_history[t_index, :] = self.Ey.copy()
@@ -195,7 +221,7 @@ class FDTD_1D:
         if fps > 1:
             print(
                 "Warning: The FPS may be too high to render a smooth animation.\n"
-                "This Python code is not responsible for any laptops or PCs that have exploded.")
+                "This Python code is not responsible for any laptops or PCs that explode.")
         x_E = np.linspace(0, self.z_range, self.Nz)
         x_H = x_E + self.dz / 2
 
@@ -235,7 +261,7 @@ class FDTD_1D:
         ax3.set_xlabel('Frequency (GHz)')
         ax3.set_ylabel('Magnitude')
         ax3.legend(loc='upper right')
-        ax3.set_title('S-parameter')
+        ax3.set_title('Transmission and Reflection')
         ax3.grid()
 
         def update(frame):
@@ -261,4 +287,3 @@ class FDTD_1D:
         ani = FuncAnimation(fig, update, frames=self.Nt, interval=1 / fps, blit=True, repeat=False)
         plt.tight_layout()
         plt.show()
-
