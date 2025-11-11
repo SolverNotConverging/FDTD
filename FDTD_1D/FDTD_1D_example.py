@@ -6,11 +6,11 @@ f_max = 100e9
 Nt = 5000
 
 sim = FDTD_1D(z_range=z_range, Nz=Nz, f_max=f_max, Nt=Nt)
-sim.add_source(src_position=1e-3, amplitude=1.0, is_show=True)
-sim.left_perfect_boundary = True
-sim.right_perfect_boundary = True
-sim.add_object(3.13, 1, (8e-3, 9e-3))
-sim.add_object(3.13, 1, (10.3e-3, 11.3e-3))
-sim.add_object(3.13, 1, (12.6e-3, 13.6e-3))
+sim.add_object(3, 1, (0e-3, 5e-3))
+sim.add_object(1, 3, (5e-3, 7e-3))
+sim.add_object(1, 1, (7e-3, 10e-3))
+sim.add_object(1, 3, (10e-3, 20e-3))
+sim.set_boundary("absorbing", "absorbing")
+sim.add_source(src_position=2e-3, amplitude=1.0, is_show=True)
 sim.run()
-sim.show_animation(fps=1)
+sim.show_animation(fps=100)
