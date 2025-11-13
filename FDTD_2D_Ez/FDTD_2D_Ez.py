@@ -810,7 +810,6 @@ class FDTD_2D_Ez:
         })
 
     # ---------- spatial curls ----------
-
     def calculate_Curl_E(self):
         # identical to your implementations (periodic variants)
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
