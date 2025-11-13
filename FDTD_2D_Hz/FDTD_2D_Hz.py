@@ -120,9 +120,9 @@ class FDTD_2D_Hz:
             ERyy_obj = float(ER)
 
         if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
-            MRzz_obj = float(ER[2])
+            MRzz_obj = float(MR[2])
         else:
-            MRzz_obj = float(ER)
+            MRzz_obj = float(MR)
 
         def edge_to_m(val, axis='x'):
             if isinstance(val, (int, np.integer)): return (val * (self.dx if axis == 'x' else self.dy))
@@ -817,36 +817,35 @@ class FDTD_2D_Hz:
         if per_y:
             for nx in range(self.Nx):
                 for ny in range(self.Ny - 1):
-                    self.d_Hz_y[nx, ny] = (self.Hz[nx, ny + 1] - self.Hz[nx, ny]) / self.dy
-                self.d_Hz_y[nx, self.Ny - 1] = (self.Ez[nx, 0] - self.Ez[nx, self.Ny - 1]) / self.dy
+                    self.d_Ex_y[nx, ny] = (self.Ex[nx, ny + 1] - self.Ex[nx, ny]) / self.dy
+                self.d_Ex_y[nx, self.Ny - 1] = (self.Ex[nx, 0] - self.Ex[nx, self.Ny - 1]) / self.dy
         else:
             for nx in range(self.Nx):
                 for ny in range(self.Ny - 1):
-                    self.d_Hz_y[nx, ny] = (self.Ez[nx, ny + 1] - self.Ez[nx, ny]) / self.dy
-                self.d_Hz_y[nx, self.Ny - 1] = (0 - self.Ez[nx, self.Ny - 1]) / self.dy
+                    self.d_Ex_y[nx, ny] = (self.Ex[nx, ny + 1] - self.Ex[nx, ny]) / self.dy
+                self.d_Ex_y[nx, self.Ny - 1] = (0 - self.Ex[nx, self.Ny - 1]) / self.dy
 
         if per_x:
             for ny in range(self.Ny):
                 for nx in range(self.Nx - 1):
-                    self.d_Ez_x[nx, ny] = (self.Ez[nx + 1, ny] - self.Ez[nx, ny]) / self.dx
-                self.d_Ez_x[self.Nx - 1, ny] = (self.Ez[0, ny] - self.Ez[self.Nx - 1, ny]) / self.dx
+                    self.d_Ey_x[nx, ny] = (self.Ey[nx + 1, ny] - self.Ey[nx, ny]) / self.dx
+                self.d_Ey_x[self.Nx - 1, ny] = (self.Ey[0, ny] - self.Ey[self.Nx - 1, ny]) / self.dx
         else:
             for ny in range(self.Ny):
                 for nx in range(self.Nx - 1):
-                    self.d_Ez_x[nx, ny] = (self.Ez[nx + 1, ny] - self.Ez[nx, ny]) / self.dx
-                self.d_Ez_x[self.Nx - 1, ny] = (0 - self.Ez[self.Nx - 1, ny]) / self.dx
+                    self.d_Ey_x[nx, ny] = (self.Ey[nx + 1, ny] - self.Ey[nx, ny]) / self.dx
+                self.d_Ey_x[self.Nx - 1, ny] = (0 - self.Ey[self.Nx - 1, ny]) / self.dx
 
     def calcualte_Psi_B(self):
-        self.Psi_Bx_y = self.b_Bx_y * self.Psi_Bx_y + self.c_Bx_y * self.d_Ez_y
-        self.Psi_By_x = self.b_By_x * self.Psi_By_x + self.c_By_x * self.d_Ez_x
+        self.Psi_Bz_x = self.b_Bz_x * self.Psi_Bz_x + self.c_Bz_x * self.d_Ey_x
+        self.Psi_Bz_y = self.b_Bz_y * self.Psi_Bz_y + self.c_Bz_y * self.d_Ex_y
 
     def update_B(self):
-        self.Bx -= self.M * (self.d_Ez_y / self.kappa_y + self.Psi_Bx_y)
-        self.By += self.M * (self.d_Ez_x / self.kappa_x + self.Psi_By_x)
+        self.Bz = self.Bz + self.M * (
+                self.d_Ey_x / self.kappa_x - self.d_Ex_y / self.kappa_y + self.Psi_Bz_x - self.Psi_Bz_y)
 
     def update_H(self):
-        self.Hx = self.Bx / self.MRxx
-        self.Hy = self.By / self.MRyy
+        self.Hz = self.Bz / self.MRzz
 
     def calculate_Curl_H(self):
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
@@ -855,39 +854,38 @@ class FDTD_2D_Hz:
         if per_y:
             for nx in range(self.Nx):
                 for ny in range(1, self.Ny):
-                    self.d_Hx_y[nx, ny] = (self.Hx[nx, ny] - self.Hx[nx, ny - 1]) / self.dy
-                self.d_Hx_y[nx, 0] = (self.Hx[nx, 0] - self.Hx[nx, self.Ny - 1]) / self.dy
+                    self.d_Hz_y[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx, ny - 1]) / self.dy
+                self.d_Hz_y[nx, 0] = (self.Hz[nx, 0] - self.Hz[nx, self.Ny - 1]) / self.dy
         else:
             for nx in range(self.Nx):
                 for ny in range(1, self.Ny):
-                    self.d_Hx_y[nx, ny] = (self.Hx[nx, ny] - self.Hx[nx, ny - 1]) / self.dy
-                self.d_Hx_y[nx, 0] = (self.Hx[nx, 0] - 0) / self.dy
+                    self.d_Hz_y[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx, ny - 1]) / self.dy
+                self.d_Hz_y[nx, 0] = (self.Hz[nx, 0] - 0) / self.dy
 
         if per_x:
             for ny in range(self.Ny):
                 for nx in range(1, self.Nx):
-                    self.d_Hy_x[nx, ny] = (self.Hy[nx, ny] - self.Hy[nx - 1, ny]) / self.dx
-                self.d_Hy_x[0, ny] = (self.Hy[0, ny] - self.Hy[self.Nx - 1, ny]) / self.dx
+                    self.d_Hz_x[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx - 1, ny]) / self.dx
+                self.d_Hz_x[0, ny] = (self.Hz[0, ny] - self.Hz[self.Nx - 1, ny]) / self.dx
         else:
             for ny in range(self.Ny):
                 for nx in range(1, self.Nx):
-                    self.d_Hy_x[nx, ny] = (self.Hy[nx, ny] - self.Hy[nx - 1, ny]) / self.dx
-                self.d_Hy_x[0, ny] = (self.Hy[0, ny] - 0) / self.dx
+                    self.d_Hz_x[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx - 1, ny]) / self.dx
+                self.d_Hz_x[0, ny] = (self.Hz[0, ny] - 0) / self.dx
 
     def calcualte_Psi_D(self):
-        self.Psi_Dz_x = self.b_Dz_x * self.Psi_Dz_x + self.c_Dz_x * self.d_Hy_x
-        self.Psi_Dz_y = self.b_Dz_y * self.Psi_Dz_y + self.c_Dz_y * self.d_Hx_y
+        self.Psi_Dx_y = self.b_Dx_y * self.Psi_Dx_y + self.c_Dx_y * self.d_Hz_y
+        self.Psi_Dy_x = self.b_Dy_x * self.Psi_Dy_x + self.c_Dy_x * self.d_Hz_x
 
     def update_D(self):
-        self.Dz = self.Dz + self.M * (
-                self.d_Hy_x / self.kappa_x - self.d_Hx_y / self.kappa_y + self.Psi_Dz_x - self.Psi_Dz_y)
+        self.Dx -= self.M * (self.d_Hz_y / self.kappa_y + self.Psi_Dx_y)
+        self.Dy += self.M * (self.d_Hz_x / self.kappa_x + self.Psi_Dy_x)
 
     def update_E(self):
-        self.Ez = self.Dz / self.ERzz
+        self.Ex = self.Dx / self.ERxx
+        self.Ey = self.Dy / self.ERyy
 
     # ---------- main loop ----------
-    # ---------- main loop ----------
-
     def run(self, record_stride=1, is_include_history=True):
         self._init_Coeff()
         self.is_include_history = is_include_history
@@ -900,11 +898,10 @@ class FDTD_2D_Hz:
             Nt_rec = (self.Nt + self.record_stride - 1) // self.record_stride
             self.Nt_rec = int(Nt_rec)
             # allocate histories with compact dtype (float32) to reduce RAM
-            dtype_hist = self.Hx.dtype  # or: np.float32
-            self.Hx_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
-            self.Hy_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
-            self.Ez_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
-            self.Dz_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
+            dtype_hist = self.Ex.dtype  # or: np.float32
+            self.Ex_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
+            self.Ey_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
+            self.Hz_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
             rec_idx = 0
         else:
             # no history arrays in monitors-only mode
@@ -930,9 +927,9 @@ class FDTD_2D_Hz:
                     continue
                 buf = {
                     **m,  # inherit all monitors keys
-                    "Ez": np.empty((Tm, L), dtype=self.Ez.dtype),
-                    "Hx": np.empty((Tm, L), dtype=self.Hx.dtype),
-                    "Hy": np.empty((Tm, L), dtype=self.Hy.dtype),
+                    "Hz": np.empty((Tm, L), dtype=self.Hz.dtype),
+                    "Ex": np.empty((Tm, L), dtype=self.Ex.dtype),
+                    "Ey": np.empty((Tm, L), dtype=self.Ey.dtype),
                     "_slx": slice(ix0, ix1),  # precomputed x-span
                     "_y": iy0,  # fixed y
                 }
@@ -943,9 +940,9 @@ class FDTD_2D_Hz:
                     continue
                 buf = {
                     **m,
-                    "Ez": np.empty((Tm, L), dtype=self.Ez.dtype),
-                    "Hx": np.empty((Tm, L), dtype=self.Hx.dtype),
-                    "Hy": np.empty((Tm, L), dtype=self.Hy.dtype),
+                    "Hz": np.empty((Tm, L), dtype=self.Hz.dtype),
+                    "Ex": np.empty((Tm, L), dtype=self.Ex.dtype),
+                    "Ey": np.empty((Tm, L), dtype=self.Ey.dtype),
                     "_x": ix0,  # fixed x
                     "_sly": slice(iy0, iy1),  # precomputed y-span
                 }
@@ -965,7 +962,7 @@ class FDTD_2D_Hz:
                     E_src = self._g(s, t_index * self.dt)
                     for i in range(min(i0, i1), max(i0, i1)):
                         if 0 <= y - 1 < self.Ny:
-                            self.d_Ez_y[i, y - 1] -= (1.0 / self.dy) * E_src
+                            self.d_Ex_y[i, y - 1] -= (1.0 / self.dy) * E_src
 
                 elif s["kind"] == 'sftf-x':
                     # vertical line (normal = x), at x = ix0, span in y
@@ -974,7 +971,7 @@ class FDTD_2D_Hz:
                     E_src = self._g(s, t_index * self.dt)
                     for j in range(min(j0, j1), max(j0, j1)):
                         if 0 <= x - 1 < self.Nx:
-                            self.d_Ez_x[x - 1, j] -= (1.0 / self.dx) * E_src
+                            self.d_Ey_x[x - 1, j] -= (1.0 / self.dx) * E_src
 
                 # E injection (waveguide-y)
                 elif s['kind'] == 'waveguide-y':
@@ -984,7 +981,7 @@ class FDTD_2D_Hz:
                     E_src = self._g(s, t_index * self.dt)
                     for i in range(lo, hi):
                         if 0 <= y - 1 < self.Ny:
-                            self.d_Ez_y[i, y - 1] -= (1.0 / self.dy) * E_src * s["Ez_src"][i - lo]
+                            self.d_Ex_y[i, y - 1] -= (1.0 / self.dy) * E_src * s["Ex_src"][i - lo]
                 elif s['kind'] == 'waveguide-x':
                     x = s["ix0"]
                     j0, j1 = s["iy0"], s["iy1"]
@@ -992,10 +989,27 @@ class FDTD_2D_Hz:
                     E_src = self._g(s, t_index * self.dt)
                     for j in range(lo, hi):
                         if 0 <= x - 1 < self.Nx:
-                            self.d_Ez_x[x - 1, j] -= (1.0 / self.dx) * E_src * s["Ez_src"][j - lo]
+                            self.d_Ey_x[x - 1, j] -= (1.0 / self.dx) * E_src * s["Ey_src"][j - lo]
 
             self.calcualte_Psi_B()
             self.update_B()
+            # --- soft sources (point/line-soft) into Dz ---
+            t_now = t_index * self.dt
+            for s in self.sources:
+                if s["kind"] == 'point':
+                    i, j = s["ix0"], s["iy0"]
+                    self.Bz[i, j] += self._g(s, t_now)  # :contentReference[oaicite:9]{index=9}
+                elif s["kind"] == 'line-soft':
+                    # If ix span -> horizontal line at y=iy0; else if iy span -> vertical line at x=ix0
+                    if s["ix0"] != s["ix1"]:
+                        y = s["iy0"]
+                        for i in range(min(s["ix0"], s["ix1"]), max(s["ix0"], s["ix1"])):
+                            self.Bz[i, y] += self._g(s, t_now)
+                    else:
+                        x = s["ix0"]
+                        for j in range(min(s["iy0"], s["iy1"]), max(s["iy0"], s["iy1"])):
+                            self.Bz[x, j] += self._g(s, t_now)
+
             self.update_H()
             self.calculate_Curl_H()
 
@@ -1008,7 +1022,7 @@ class FDTD_2D_Hz:
                     i0, i1 = s["ix0"], s["ix1"]
                     for i in range(min(i0, i1), max(i0, i1)):
                         if 0 <= y < self.Ny:
-                            self.d_Hx_y[i, y] += (1.0 / self.dy) * H_src
+                            self.d_Hz_y[i, y] += (1.0 / self.dy) * H_src
 
                 elif s["kind"] == 'sftf-x':
                     # vertical TF/SF (normal = x) → use dx/2, dt/2 stagger
@@ -1017,7 +1031,7 @@ class FDTD_2D_Hz:
                     j0, j1 = s["iy0"], s["iy1"]
                     for j in range(min(j0, j1), max(j0, j1)):
                         if 0 <= x < self.Nx:
-                            self.d_Hy_x[x, j] -= (1.0 / self.dx) * H_src
+                            self.d_Hz_x[x, j] -= (1.0 / self.dx) * H_src
 
                 # H injection (waveguide-y)
                 elif s["kind"] == 'waveguide-y':
@@ -1028,7 +1042,7 @@ class FDTD_2D_Hz:
                     lo, hi = (min(i0, i1), max(i0, i1))
                     for i in range(lo, hi):
                         if 0 <= y < self.Ny:
-                            self.d_Hx_y[i, y] -= (1.0 / self.dy) * H_src * s["Hx_src"][i - lo]
+                            self.d_Hz_y[i, y] -= (1.0 / self.dy) * H_src * s["Hz_src"][i - lo]
 
                 elif s["kind"] == 'waveguide-x':
                     n_eff = s["n_eff"]
@@ -1038,28 +1052,10 @@ class FDTD_2D_Hz:
                     lo, hi = (min(j0, j1), max(j0, j1))
                     for j in range(lo, hi):
                         if 0 <= x < self.Nx:
-                            self.d_Hy_x[x, j] += (1.0 / self.dx) * H_src * s["Hy_src"][j - lo]
+                            self.d_Hz_x[x, j] += (1.0 / self.dx) * H_src * s["Hz_src"][j - lo]
 
             self.calcualte_Psi_D()
             self.update_D()
-
-            # --- soft sources (point/line-soft) into Dz ---
-            t_now = t_index * self.dt
-            for s in self.sources:
-                if s["kind"] == 'point':
-                    i, j = s["ix0"], s["iy0"]
-                    self.Dz[i, j] += self._g(s, t_now)  # :contentReference[oaicite:9]{index=9}
-                elif s["kind"] == 'line-soft':
-                    # If ix span -> horizontal line at y=iy0; else if iy span -> vertical line at x=ix0
-                    if s["ix0"] != s["ix1"]:
-                        y = s["iy0"]
-                        for i in range(min(s["ix0"], s["ix1"]), max(s["ix0"], s["ix1"])):
-                            self.Dz[i, y] += self._g(s, t_now)
-                    else:
-                        x = s["ix0"]
-                        for j in range(min(s["iy0"], s["iy1"]), max(s["iy0"], s["iy1"])):
-                            self.Dz[x, j] += self._g(s, t_now)
-
             # update E
             self.update_E()
 
@@ -1068,24 +1064,23 @@ class FDTD_2D_Hz:
                 if buf["it0"] <= t_index < buf["it1"]:
                     k = t_index - buf["it0"]
                     if buf["orientation"] == "horizontal":
-                        self_Ez = self.Ez[buf["_slx"], buf["_y"]]
-                        self_Hx = self.Hx[buf["_slx"], buf["_y"]]
-                        self_Hy = self.Hy[buf["_slx"], buf["_y"]]
+                        self_Hz = self.Hz[buf["_slx"], buf["_y"]]
+                        self_Ex = self.Ex[buf["_slx"], buf["_y"]]
+                        self_Ey = self.Ey[buf["_slx"], buf["_y"]]
                     else:  # vertical
-                        self_Ez = self.Ez[buf["_x"], buf["_sly"]]
-                        self_Hx = self.Hx[buf["_x"], buf["_sly"]]
-                        self_Hy = self.Hy[buf["_x"], buf["_sly"]]
+                        self_Hz = self.Hz[buf["_x"], buf["_sly"]]
+                        self_Ex = self.Ex[buf["_x"], buf["_sly"]]
+                        self_Ey = self.Ey[buf["_x"], buf["_sly"]]
 
-                    buf["Ez"][k, :] = self_Ez
-                    buf["Hx"][k, :] = self_Hx
-                    buf["Hy"][k, :] = self_Hy
+                    buf["Ez"][k, :] = self_Hz
+                    buf["Hx"][k, :] = self_Ex
+                    buf["Hy"][k, :] = self_Ey
 
             # record
             if self.is_include_history and (t_index % self.record_stride) == 0:
-                self.Hx_history[rec_idx, :, :] = self.Hx
-                self.Hy_history[rec_idx, :, :] = self.Hy
-                self.Ez_history[rec_idx, :, :] = self.Ez
-                self.Dz_history[rec_idx, :, :] = self.Dz
+                self.Ex_history[rec_idx, :, :] = self.Ex
+                self.Ey_history[rec_idx, :, :] = self.Ey
+                self.Hz_history[rec_idx, :, :] = self.Hz
                 rec_idx += 1
 
         # --- finalize monitors outputs (drop private helper keys) ---
@@ -1093,8 +1088,6 @@ class FDTD_2D_Hz:
         for buf in monitor_results:
             out = {k: v for k, v in buf.items() if not k.startswith("_")}
             self.monitor_results.append(out)
-
-        # ---------- animation ----------
 
     def show_animation(self, fps=10, dynamic_clim=True, clim_smooth=0.2, pad=1e-12):
         """
@@ -1105,7 +1098,7 @@ class FDTD_2D_Hz:
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
 
-        if not hasattr(self, "Hx_history") or self.Hx_history.size == 0:
+        if not hasattr(self, "Ex_history") or self.Ex_history.size == 0:
             raise RuntimeError("No recorded field history. Run sim.run(...) first or load from file.")
 
         if not hasattr(self, "is_include_history") or self.is_include_history == False:
@@ -1113,22 +1106,22 @@ class FDTD_2D_Hz:
 
         Nx, Ny = self.Nx, self.Ny
         extent = [0, self.x_range, 0, self.y_range]
-        mu_avg = 0.5 * (self.MRxx + self.MRyy)
-        n_map = np.sqrt(self.ERzz * mu_avg)
+        eps_avg = 0.5 * (self.ERxx + self.ERyy)
+        n_map = np.sqrt(self.MRzz * eps_avg)
 
         # global clim (fallback)
         if not dynamic_clim:
-            vmax_Hx = np.max(np.abs(self.Hx_history)) + pad
-            vmax_Hy = np.max(np.abs(self.Hy_history)) + pad
-            vmax_Ez = np.max(np.abs(self.Ez_history)) + pad
-            vmax_global = max(vmax_Hx, vmax_Hy, vmax_Ez)
+            vmax_Ex = np.max(np.abs(self.Ex_history)) + pad
+            vmax_Ey = np.max(np.abs(self.Ey_history)) + pad
+            vmax_Hz = np.max(np.abs(self.Hz_history)) + pad
+            vmax_global = max(vmax_Ex, vmax_Ey, vmax_Hz)
             clim_H = (-vmax_global, vmax_global)
             clim_E = (-vmax_global, vmax_global)
 
         plt.ioff()
         fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
-        ax_n, ax_hx = axes[0]
-        ax_hy, ax_ez = axes[1]
+        ax_n, ax_ex = axes[0]
+        ax_ey, ax_hz = axes[1]
 
         # n-map
         im_n = ax_n.imshow(n_map.T, origin="lower", aspect="auto", extent=extent, cmap="viridis")
@@ -1138,31 +1131,31 @@ class FDTD_2D_Hz:
         ax_n.set_xlabel("x (m)")
         ax_n.set_ylabel("y (m)")
 
-        # Hx / Hy / Ez
-        im_hx = ax_hx.imshow(self.Hx_history[0].T, origin="lower", aspect="auto", extent=extent, cmap="jet")
-        fig.colorbar(im_hx, ax=ax_hx).set_label("Hx")
-        ax_hx.set_title("Hx")
-        ax_hx.set_xlabel("x (m)")
-        ax_hx.set_ylabel("y (m)")
+        # Ex / Ey / Hz
+        im_ex = ax_ex.imshow(self.Ex_history[0].T, origin="lower", aspect="auto", extent=extent, cmap="jet")
+        fig.colorbar(im_ex, ax=ax_ex).set_label("Ex")
+        ax_ex.set_title("Ex")
+        ax_ex.set_xlabel("x (m)")
+        ax_ex.set_ylabel("y (m)")
 
-        im_hy = ax_hy.imshow(self.Hy_history[0].T, origin="lower", aspect="auto", extent=extent, cmap="jet")
-        fig.colorbar(im_hy, ax=ax_hy).set_label("Hy")
-        ax_hy.set_title("Hy")
-        ax_hy.set_xlabel("x (m)")
-        ax_hy.set_ylabel("y (m)")
+        im_ey = ax_ey.imshow(self.Ey_history[0].T, origin="lower", aspect="auto", extent=extent, cmap="jet")
+        fig.colorbar(im_ey, ax=ax_ey).set_label("Ey")
+        ax_ey.set_title("Ey")
+        ax_ey.set_xlabel("x (m)")
+        ax_ey.set_ylabel("y (m)")
 
-        im_ez = ax_ez.imshow(self.Ez_history[0].T, origin="lower", aspect="auto", extent=extent, cmap="jet")
-        fig.colorbar(im_ez, ax=ax_ez).set_label("Ez")
-        ax_ez.set_title("Ez")
-        ax_ez.set_xlabel("x (m)")
-        ax_ez.set_ylabel("y (m)")
+        im_hz = ax_hz.imshow(self.Hz_history[0].T, origin="lower", aspect="auto", extent=extent, cmap="jet")
+        fig.colorbar(im_hz, ax=ax_hz).set_label("Hz")
+        ax_hz.set_title("Hz")
+        ax_hz.set_xlabel("x (m)")
+        ax_hz.set_ylabel("y (m)")
 
         # time text
-        time_text = ax_ez.text(0.02, 0.02, "", transform=ax_ez.transAxes,
+        time_text = ax_hz.text(0.02, 0.02, "", transform=ax_hz.transAxes,
                                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
 
         # --- draw PML patches (black, alpha=0.3) ---
-        def maybe_add_pml(ax):
+        def add_pml(ax):
             if self.pml_width is None: return
             # compute cell widths used when add_PML ran
             if isinstance(self.pml_width, int):
@@ -1181,8 +1174,7 @@ class FDTD_2D_Hz:
                 ax.add_patch(
                     Rectangle((0, self.y_range - yw), self.x_range, yw, facecolor='black', alpha=0.3, lw=0))
 
-        for ax in (ax_n, ax_hx, ax_hy, ax_ez):
-            maybe_add_pml(ax)
+        add_pml(ax_n)
 
         # --- draw sources as red markers/lines ---
         def draw_sources(ax):
@@ -1201,41 +1193,113 @@ class FDTD_2D_Hz:
                     else:  # vertical
                         ax.plot([x0, x0], [y0, y1], '-', color='red', lw=2)
 
-        for ax in (ax_n, ax_hx, ax_hy, ax_ez):
-            draw_sources(ax)
+        draw_sources(ax_n)
 
         # clims
         if dynamic_clim:
-            frame0_max = max(np.max(np.abs(self.Hx_history[0])) + pad,
-                             np.max(np.abs(self.Hy_history[0])) + pad,
-                             np.max(np.abs(self.Ez_history[0])) + pad)
+            frame0_max = max(np.max(np.abs(self.Ex_history[0])) + pad,
+                             np.max(np.abs(self.Ey_history[0])) + pad,
+                             np.max(np.abs(self.Hz_history[0])) + pad)
             smoothed_vmax = frame0_max
-            im_hx.set_clim(-smoothed_vmax, smoothed_vmax)
-            im_hy.set_clim(-smoothed_vmax, smoothed_vmax)
-            im_ez.set_clim(-smoothed_vmax, smoothed_vmax)
+            im_ex.set_clim(-smoothed_vmax, smoothed_vmax)
+            im_ey.set_clim(-smoothed_vmax, smoothed_vmax)
+            im_hz.set_clim(-smoothed_vmax, smoothed_vmax)
         else:
-            im_hx.set_clim(*clim_H)
-            im_hy.set_clim(*clim_H)
-            im_ez.set_clim(*clim_E)
+            im_ex.set_clim(*clim_E)
+            im_ey.set_clim(*clim_E)
+            im_hz.set_clim(*clim_H)
 
         def _update(frame):
             nonlocal smoothed_vmax
-            im_hx.set_data(self.Hx_history[frame].T)
-            im_hy.set_data(self.Hy_history[frame].T)
-            im_ez.set_data(self.Ez_history[frame].T)
+            im_ex.set_data(self.Ex_history[frame].T)
+            im_ey.set_data(self.Ey_history[frame].T)
+            im_hz.set_data(self.Hz_history[frame].T)
             if dynamic_clim:
-                vmax_now = max(np.max(np.abs(self.Hx_history[frame])) + pad,
-                               np.max(np.abs(self.Hy_history[frame])) + pad,
-                               np.max(np.abs(self.Ez_history[frame])) + pad)
+                vmax_now = max(np.max(np.abs(self.Ex_history[frame])) + pad,
+                               np.max(np.abs(self.Ey_history[frame])) + pad,
+                               np.max(np.abs(self.Hz_history[frame])) + pad)
                 smoothed_vmax = (1.0 - clim_smooth) * vmax_now + clim_smooth * smoothed_vmax
                 v = max(smoothed_vmax, pad)
-                im_hx.set_clim(-v, v)
-                im_hy.set_clim(-v, v)
-                im_ez.set_clim(-v, v)
+                im_ex.set_clim(-v, v)
+                im_ey.set_clim(-v, v)
+                im_hz.set_clim(-v, v)
             tE = frame * getattr(self, "record_stride", 1) * self.dt
             time_text.set_text(f"t = {tE * 1e12:.3f} ps")
-            return im_hx, im_hy, im_ez, time_text
+            return im_ex, im_ey, im_hz, time_text
 
         interval_ms = 1000.0 / max(1, fps)
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
+
+    # ---------- state dict / I/O ----------
+    def state_dict(self):
+        """Return a shallow copy of the simulator's full state dictionary.
+
+        This includes *everything* in self.__dict__ such as materials, fields,
+        sources, PML parameters, monitors definitions **and** monitor_results,
+        field histories, etc.
+        """
+        return dict(self.__dict__)
+
+    def load_state_dict(self, state: dict):
+        """Replace the simulator's state with a provided dictionary.
+
+        Note: This overwrites the current instance's attributes in-place.
+        """
+        if not isinstance(state, dict):
+            raise TypeError("state must be a dict produced by state_dict() / save().")
+        self.__dict__.clear()
+        self.__dict__.update(state)
+
+    def save(self, path: str, include_histories: bool = True):
+        """Save the full simulator state to *path* using pickle.
+
+        Args
+        ----
+        path : str
+            File path to write (e.g., 'run.pkl').
+        include_histories : bool
+            If False, large field history arrays (Hx/Hy/Ez/Dz) are stripped to reduce size.
+        """
+        state = self.state_dict()
+
+        if not include_histories:
+            for k in ("Hx_history", "Hy_history", "Ez_history", "Dz_history"):
+                if k in state:
+                    state[k] = type(state[k])()  # empty like its type
+
+        # Write atomically: write to .part then replace
+        import tempfile, time, os, pickle
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        base = os.path.basename(path)
+        fd, tmp = tempfile.mkstemp(prefix=base + ".part.", dir=d)
+        tmp_path = tmp
+        try:
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, path)
+            tmp_path = None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    @classmethod
+    def load(cls, path: str):
+        """Load a simulator saved with save() and return a ready-to-use instance."""
+        import pickle
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+        sim = cls.__new__(cls)  # bypass __init__
+        if not isinstance(state, dict):
+            raise TypeError("Pickle file does not contain a state dict.")
+        sim.__dict__.update(state)
+        return sim
+
+    @classmethod
+    def animate_npz(cls, path, fps=60, dynamic_clim=True, clim_smooth=0.2):
+        sim = cls.load(path)
+        sim.show_animation(fps=fps, dynamic_clim=dynamic_clim, clim_smooth=clim_smooth)
+        return sim

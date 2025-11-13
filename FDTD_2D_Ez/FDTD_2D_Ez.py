@@ -1085,7 +1085,6 @@ class FDTD_2D_Ez:
                 self.Hx_history[rec_idx, :, :] = self.Hx
                 self.Hy_history[rec_idx, :, :] = self.Hy
                 self.Ez_history[rec_idx, :, :] = self.Ez
-                self.Dz_history[rec_idx, :, :] = self.Dz
                 rec_idx += 1
 
         # --- finalize monitors outputs (drop private helper keys) ---
@@ -1162,7 +1161,7 @@ class FDTD_2D_Ez:
                                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
 
         # --- draw PML patches (black, alpha=0.3) ---
-        def maybe_add_pml(ax):
+        def add_pml(ax):
             if self.pml_width is None: return
             # compute cell widths used when add_PML ran
             if isinstance(self.pml_width, int):
@@ -1181,8 +1180,7 @@ class FDTD_2D_Ez:
                 ax.add_patch(
                     Rectangle((0, self.y_range - yw), self.x_range, yw, facecolor='black', alpha=0.3, lw=0))
 
-        for ax in (ax_n, ax_hx, ax_hy, ax_ez):
-            maybe_add_pml(ax)
+        add_pml(ax_n)
 
         # --- draw sources as red markers/lines ---
         def draw_sources(ax):
@@ -1201,8 +1199,8 @@ class FDTD_2D_Ez:
                     else:  # vertical
                         ax.plot([x0, x0], [y0, y1], '-', color='red', lw=2)
 
-        for ax in (ax_n, ax_hx, ax_hy, ax_ez):
-            draw_sources(ax)
+
+        draw_sources(ax_n)
 
         # clims
         if dynamic_clim:
