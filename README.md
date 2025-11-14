@@ -1,5 +1,5 @@
 # FDTD
-Baby level FDTD solver that literally does nothing.
+Baby level FDTD solver that can do 1D and 2D FDTD simulation. CPML is used in 2D FDTD. Supports anisotropic material, SF/TF source/ waveguide eigenmode source/ NF2FF.
 
 Also a fun fact: if you use it to simulate a high Q stuff like photonic 
 donut resonator idk with Q=10^11, you can expect it to finish between 
