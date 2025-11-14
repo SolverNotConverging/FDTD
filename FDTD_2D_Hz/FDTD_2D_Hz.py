@@ -465,20 +465,23 @@ class FDTD_2D_Hz:
             phase = np.angle(Hz[kmax])
             Hz = (Hz * np.exp(-1j * phase)).real
 
-            # Normalize Ez to max|.| = 1 (shape only)
-            Hz = Hz / (np.max(np.abs(Hz)) + 1e-30)
-
             # Tutorial relation: h_x = - n_eff * mu_xx^{-1} * e_z
             Ex = -(n_eff[m]) * (ERxx_inv @ Hz)
+
             # MRxx_inv is a sparse diagonal; ensure dense vector
             Ex = Ex.A.squeeze() if hasattr(Ex, "A") else np.asarray(Ex).squeeze()
             Ex = Ex.real
 
-            Hz_modes.append(Hz)
-            Ex_modes.append(Ex)
+            # Normalize Ex to max|.| = amplitude
+            norm = amplitude / np.max(np.abs(Ex))
+            Ex = Ex * norm
+            Hz = Hz * norm
 
-        Hz_modes = np.asarray(Hz_modes) * amplitude
-        Ex_modes = np.asarray(Ex_modes) * amplitude
+            Ex_modes.append(Ex)
+            Hz_modes.append(Hz)
+
+        Ex_modes = np.asarray(Ex_modes)
+        Hz_modes = np.asarray(Hz_modes)
 
         return np.asarray(Hz_modes), np.asarray(Ex_modes), np.asarray(n_eff, dtype=float)
 
@@ -534,17 +537,20 @@ class FDTD_2D_Hz:
             phase = np.angle(Hz[kmax])
             Hz = (Hz * np.exp(-1j * phase)).real
 
-            Hz = Hz / (np.max(np.abs(Hz)) + 1e-30)
-
             Ey = -(n_eff[m]) * (ERyy_inv @ Hz)
             Ey = Ey.A.squeeze() if hasattr(Ey, "A") else np.asarray(Ey).squeeze()
             Ey = Ey.real
 
+            norm = amplitude / np.max(np.abs(Ey))
+
+            Ey = Ey * norm
+            Hz = Hz * norm
+
             Hz_modes.append(Hz)
             Ey_modes.append(Ey)
 
-        Hz_modes = np.asarray(Hz_modes) * amplitude
-        Ey_modes = np.asarray(Ey_modes) * amplitude
+        Hz_modes = np.asarray(Hz_modes)
+        Ey_modes = np.asarray(Ey_modes)
 
         return np.asarray(Hz_modes), np.asarray(Ey_modes), np.asarray(n_eff, dtype=float)
 
@@ -661,8 +667,8 @@ class FDTD_2D_Hz:
                 num_modes=max(1, int(modes_to_show)),
                 guess=eig_guess, amplitude=float(amplitude)
             )
-            # Visualize only the Ez mode profiles; title shows n_eff
-            # Visualize Ez and Hx profiles; title shows n_eff
+            # Visualize only the Ex mode profiles; title shows n_eff
+            # Visualize Ex and Hz profiles; title shows n_eff
             if is_show:
                 import matplotlib.pyplot as plt
                 lo, hi = (min(ix0, ix1), max(ix0, ix1))
@@ -675,11 +681,11 @@ class FDTD_2D_Hz:
                 for m in range(rows):
                     ax1 = axs[m]
                     ax2 = ax1.twinx()
-                    ax1.plot(x_axis, Hz_modes[m], linewidth=1.6, label='Hz')
-                    ax2.plot(x_axis, Ex_modes[m], linestyle='--', linewidth=1.2, label='Ex')
+                    ax1.plot(x_axis, Ex_modes[m], linewidth=1.6, label='Ex')
+                    ax2.plot(x_axis, Hz_modes[m], linestyle='--', linewidth=1.2, label='Hz')
 
-                    ax1.set_ylabel('Hz (arb.)')
-                    ax2.set_ylabel('Ex (arb.)')
+                    ax1.set_ylabel('Ex (arb.)')
+                    ax2.set_ylabel('Hz (arb.)')
                     ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
                     ax1.grid(True, alpha=0.25)
 
@@ -732,11 +738,11 @@ class FDTD_2D_Hz:
                 for m in range(rows):
                     ax1 = axs[m]
                     ax2 = ax1.twinx()
-                    ax1.plot(y_axis, Hz_modes[m], linewidth=1.6, label='Hz')
-                    ax2.plot(y_axis, Ey_modes[m], linestyle='--', linewidth=1.2, label='Ey')
+                    ax1.plot(y_axis, Ey_modes[m], linewidth=1.6, label='Ey')
+                    ax2.plot(y_axis, Hz_modes[m], linestyle='--', linewidth=1.2, label='Hz')
 
-                    ax1.set_ylabel('Hz (arb.)')
-                    ax2.set_ylabel('Ey (arb.)')
+                    ax1.set_ylabel('Ey (arb.)')
+                    ax2.set_ylabel('Hz (arb.)')
                     ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
                     ax1.grid(True, alpha=0.25)
 
@@ -841,7 +847,7 @@ class FDTD_2D_Hz:
         self.Psi_Bz_y = self.b_Bz_y * self.Psi_Bz_y + self.c_Bz_y * self.d_Ex_y
 
     def update_B(self):
-        self.Bz = self.Bz + self.M * (
+        self.Bz = self.Bz - self.M * (
                 self.d_Ey_x / self.kappa_x - self.d_Ex_y / self.kappa_y + self.Psi_Bz_x - self.Psi_Bz_y)
 
     def update_H(self):
@@ -878,8 +884,8 @@ class FDTD_2D_Hz:
         self.Psi_Dy_x = self.b_Dy_x * self.Psi_Dy_x + self.c_Dy_x * self.d_Hz_x
 
     def update_D(self):
-        self.Dx -= self.M * (self.d_Hz_y / self.kappa_y + self.Psi_Dx_y)
-        self.Dy += self.M * (self.d_Hz_x / self.kappa_x + self.Psi_Dy_x)
+        self.Dx += self.M * (self.d_Hz_y / self.kappa_y + self.Psi_Dx_y)
+        self.Dy -= self.M * (self.d_Hz_x / self.kappa_x + self.Psi_Dy_x)
 
     def update_E(self):
         self.Ex = self.Dx / self.ERxx
@@ -1022,7 +1028,7 @@ class FDTD_2D_Hz:
                     i0, i1 = s["ix0"], s["ix1"]
                     for i in range(min(i0, i1), max(i0, i1)):
                         if 0 <= y < self.Ny:
-                            self.d_Hz_y[i, y] += (1.0 / self.dy) * H_src
+                            self.d_Hz_y[i, y] -= (1.0 / self.dy) * H_src
 
                 elif s["kind"] == 'sftf-x':
                     # vertical TF/SF (normal = x) → use dx/2, dt/2 stagger
@@ -1031,7 +1037,7 @@ class FDTD_2D_Hz:
                     j0, j1 = s["iy0"], s["iy1"]
                     for j in range(min(j0, j1), max(j0, j1)):
                         if 0 <= x < self.Nx:
-                            self.d_Hz_x[x, j] -= (1.0 / self.dx) * H_src
+                            self.d_Hz_x[x, j] += (1.0 / self.dx) * H_src
 
                 # H injection (waveguide-y)
                 elif s["kind"] == 'waveguide-y':
@@ -1042,7 +1048,7 @@ class FDTD_2D_Hz:
                     lo, hi = (min(i0, i1), max(i0, i1))
                     for i in range(lo, hi):
                         if 0 <= y < self.Ny:
-                            self.d_Hz_y[i, y] -= (1.0 / self.dy) * H_src * s["Hz_src"][i - lo]
+                            self.d_Hz_y[i, y] += (1.0 / self.dy) * H_src * s["Hz_src"][i - lo]
 
                 elif s["kind"] == 'waveguide-x':
                     n_eff = s["n_eff"]
@@ -1052,7 +1058,7 @@ class FDTD_2D_Hz:
                     lo, hi = (min(j0, j1), max(j0, j1))
                     for j in range(lo, hi):
                         if 0 <= x < self.Nx:
-                            self.d_Hz_x[x, j] += (1.0 / self.dx) * H_src * s["Hz_src"][j - lo]
+                            self.d_Hz_x[x, j] -= (1.0 / self.dx) * H_src * s["Hz_src"][j - lo]
 
             self.calcualte_Psi_D()
             self.update_D()
