@@ -98,10 +98,16 @@ class FDTD_2D_Hz:
 
         # multi-source list ---
         # each source is a dict with keys:
-        #   kind: 'point' | 'line-soft' | 'sftf-x' | 'sftf-y'
-        #   ix0, ix1, iy0, iy1 (ints; for points, ix0,iy0 used; for lines, spans are used)
+        #   kind: 'point' | 'line-soft' | 'sftf' | 'waveguide-x' | 'waveguide-y'
+        #   ix0, ix1, iy0, iy1 (ints; for points, ix0,iy0 used; for spans, [ix0,ix1), [iy0,iy1))
         #   amplitude, t0, tw, f_min (or None), f_max
-        #   direction: '+x'/'-x'/' +y'/'-y' (used by SF/TF if needed later)
+        #   (for 'sftf'):
+        #       angle      : propagation angle θ (radians) measured from +x toward +y
+        #       f0         : center frequency used for kx, ky
+        #       kx, ky, k0 : components and magnitude of k-vector
+        #       delay_xlo, delay_xhi : 1D arrays of time delay for left/right TF/SF edges
+        #       delay_ylo, delay_yhi : 1D arrays of time delay for bottom/top TF/SF edges
+        #       ix_lo, ix_hi, iy_lo, iy_hi : sorted interior TF region indices
         self.sources = []
         self.avg_freqs = []  # one per source (spectral centroid for info/diagnostics)
 
@@ -554,27 +560,32 @@ class FDTD_2D_Hz:
         return np.asarray(Hz_modes), np.asarray(Ey_modes), np.asarray(n_eff, dtype=float)
 
     # ---------- public API: add_source ----------
-    def add_source(self, kind, x, y, amplitude=1.0, t0=None, tw=None, f_min=None, f_max=None, mode_index=1,
-                   modes_to_show=4, eig_guess=None, is_show=True, ):
+    def add_source(self, kind, x, y, amplitude=1.0, t0=None, tw=None,
+                   f_min=None, f_max=None, mode_index=1,
+                   modes_to_show=4, eig_guess=None, is_show=True,
+                   angle=None):
 
         """
         Add a source.
 
         kind:
-          'point'       : soft point into Dz at (x,y)
-          'line-soft'   : soft line into Dz; give x=(ix0,ix1) & y=j or y=(j0,j1) & x=i
-          'sftf-x'      : TF/SF boundary with **normal along x**  → vertical line at fixed x, spanning y
-          'sftf-y'      : TF/SF boundary with **normal along y**  → horizontal line at fixed y, spanning x
+          'point'       : soft point into Bz at (x,y)
+          'line-soft'   : soft line into Bz; give x=(ix0,ix1) & y=j or y=(j0,j1) & x=i
+          'sftf'        : TF/SF rectangular box; give x=(x_lo,x_hi), y=(y_lo,y_hi) and angle
           'waveguide-x' : modal source on a vertical slice injecting toward +x
           'waveguide-y' : modal source on a horizontal slice injecting toward +y
+
         x, y:
           Either ints (indices) or floats (meters). For spans, pass (start, end).
-           num_modes, mode_index and guess are used only for 'waveguide' mode
+
+        For 'sftf':
+          - x must be a span (x_lo, x_hi) and y must be a span (y_lo, y_hi).
+          - angle is the propagation angle θ in radians measured from +x toward +y.
         """
 
         k = kind.lower()
-        if k not in ('point', 'line-soft', 'sftf-x', 'sftf-y', 'waveguide-x', 'waveguide-y'):
-            raise ValueError("kind must be 'point', 'line-soft', 'sftf-x', 'sftf-y', 'waveguide-x', 'waveguide-y'.")
+        if k not in ('point', 'line-soft', 'sftf', 'waveguide-x', 'waveguide-y'):
+            raise ValueError("kind must be 'point', 'line-soft', 'sftf', 'waveguide-x', 'waveguide-y'.")
 
         # normalize frequency parameters
         fmin = f_min if f_min is not None else self.f_min
@@ -624,7 +635,6 @@ class FDTD_2D_Hz:
             f_min=(None if fmin is None else float(fmin)),
             f_max=float(fmax),
         )
-
         # optional preview
         if is_show:
             import matplotlib.pyplot as plt
@@ -648,6 +658,81 @@ class FDTD_2D_Hz:
 
         tt = np.arange(0, self.Nt * self.dt, self.dt)
         self.avg_freqs.append(self._spec_centroid(self._g(s, tt)))
+
+        # --- extra parameters for angled TF/SF source ('sftf') ---
+        if k == 'sftf':
+            # Require spans in both x and y
+            if ix0 == ix1 or iy0 == iy1:
+                raise ValueError("For 'sftf', x and y must both be spans: x=(x_lo,x_hi), y=(y_lo,y_hi).")
+
+            if angle is None:
+                raise ValueError("For 'sftf' you must provide angle (radians).")
+
+            theta = float(angle)
+
+            # Choose a center frequency f0 for kx, ky
+            if fmin is not None and fmax is not None:
+                f0 = 0.5 * (fmin + fmax)
+            else:
+                f0 = fmax
+            f0 = float(f0)
+            omega0 = 2.0 * np.pi * f0
+
+            # Effective index in TF region (TEz: use MRzz & avg(ERxx, ERyy))
+            i_lo, i_hi = min(ix0, ix1), max(ix0, ix1)
+            j_lo, j_hi = min(iy0, iy1), max(iy0, iy1)
+            if i_hi > self.Nx: i_hi = self.Nx
+            if j_hi > self.Ny: j_hi = self.Ny
+
+            erxx_slice = self.ERxx[i_lo:i_hi, j_lo:j_hi]
+            eryy_slice = self.ERyy[i_lo:i_hi, j_lo:j_hi]
+            mz_slice = self.MRzz[i_lo:i_hi, j_lo:j_hi]
+
+            if erxx_slice.size == 0 or eryy_slice.size == 0 or mz_slice.size == 0:
+                n_src = 1.0
+            else:
+                eps_avg_slice = 0.5 * (erxx_slice + eryy_slice)
+                n_src = float(np.sqrt(np.mean(eps_avg_slice * mz_slice)))
+
+            # k0, kx, ky for the plane wave
+            k0 = n_src * omega0 / self.c0
+            kx = k0 * np.cos(theta)
+            ky = k0 * np.sin(theta)
+
+            dx, dy = self.dx, self.dy
+
+            # Hz is at cell centers: (i+0.5)*dx, (j+0.5)*dy.
+            xs_c = (np.arange(i_lo, i_hi) + 0.5) * dx
+            ys_c = (np.arange(j_lo, j_hi) + 0.5) * dy
+
+            # Left/right Hz edges
+            xL = (i_lo - 0.5) * dx
+            xR = (i_hi + 0.5) * dx
+            delay_xlo = (kx * xL + ky * ys_c) / omega0  # shape (ny_side,)
+            delay_xhi = (kx * xR + ky * ys_c) / omega0
+
+            # Bottom/top Hz edges
+            yB = (j_lo - 0.5) * dy
+            yT = (j_hi + 0.5) * dy
+            delay_ylo = (kx * xs_c + ky * yB) / omega0  # shape (nx_side,)
+            delay_yhi = (kx * xs_c + ky * yT) / omega0
+
+            # For angle = 0 → ky = 0, so delay_xlo/xhi are constant in y (no tilt).
+
+            s["angle"] = theta
+            s["f0"] = f0
+            s["omega0"] = omega0
+            s["kx"] = kx
+            s["ky"] = ky
+            s["k0"] = k0
+            s["delay_xlo"] = delay_xlo
+            s["delay_xhi"] = delay_xhi
+            s["delay_ylo"] = delay_ylo
+            s["delay_yhi"] = delay_yhi
+            s["ix_lo"] = i_lo
+            s["ix_hi"] = i_hi
+            s["iy_lo"] = j_lo
+            s["iy_hi"] = j_hi
 
         # --- waveguide port (horizontal, normal = y) ---
         if k == 'waveguide-y':
@@ -960,23 +1045,53 @@ class FDTD_2D_Hz:
 
             # --- SF/TF E injection (by normal) ---
             for s in self.sources:
-                if s["kind"] == 'sftf-y':
-                    # horizontal line (normal = y), at y = iy0, span in x
-                    y = s["iy0"]
-                    i0, i1 = s["ix0"], s["ix1"]
-                    E_src = self._g(s, t_index * self.dt)
-                    for i in range(min(i0, i1), max(i0, i1)):
-                        if 0 <= y - 1 < self.Ny:
-                            self.d_Ex_y[i, y - 1] -= (1.0 / self.dy) * E_src
+                if s["kind"] == 'sftf':
+                    ix_lo = s["ix_lo"]
+                    ix_hi = s["ix_hi"]
+                    iy_lo = s["iy_lo"]
+                    iy_hi = s["iy_hi"]
 
-                elif s["kind"] == 'sftf-x':
-                    # vertical line (normal = x), at x = ix0, span in y
-                    x = s["ix0"]
-                    j0, j1 = s["iy0"], s["iy1"]
-                    E_src = self._g(s, t_index * self.dt)
-                    for j in range(min(j0, j1), max(j0, j1)):
-                        if 0 <= x - 1 < self.Nx:
-                            self.d_Ey_x[x - 1, j] -= (1.0 / self.dx) * E_src
+                    nx_side = ix_hi - ix_lo
+                    ny_side = iy_hi - iy_lo
+                    if nx_side <= 0 or ny_side <= 0:
+                        continue
+
+                    t_now = t_index * self.dt
+                    kx = s["kx"]
+                    ky = s["ky"]
+                    k0 = s["k0"] + 1e-30
+
+                    # --- Left edge: Ey tangential, normal = -x ---
+                    if ix_lo - 1 >= 0:
+                        t_edge = t_now - s["delay_xlo"]  # vector over j
+                        Hz_inc = self._g(s, t_edge)
+                        Ey_inc = -(kx / k0) * Hz_inc  # TEz plane-wave relation
+                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                            self.d_Ey_x[ix_lo - 1, j] -= Ey_inc[j_off] / self.dx
+
+                    # --- Right edge: Ey tangential, normal = +x ---
+                    if ix_hi - 1 >= 0 and ix_hi - 1 < self.Nx:
+                        t_edge = t_now - s["delay_xhi"]
+                        Hz_inc = self._g(s, t_edge)
+                        Ey_inc = -(kx / k0) * Hz_inc
+                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                            self.d_Ey_x[ix_hi - 1, j] += Ey_inc[j_off] / self.dx
+
+                    # --- Bottom edge: Ex tangential, normal = -y ---
+                    if iy_lo - 1 >= 0:
+                        t_edge = t_now - s["delay_ylo"]  # vector over i
+                        Hz_inc = self._g(s, t_edge)
+                        Ex_inc = (ky / k0) * Hz_inc
+                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                            self.d_Ex_y[i, iy_lo - 1] -= Ex_inc[i_off] / self.dy
+
+                    # --- Top edge: Ex tangential, normal = +y ---
+                    if iy_hi - 1 >= 0 and iy_hi - 1 < self.Ny:
+                        t_edge = t_now - s["delay_yhi"]
+                        Hz_inc = self._g(s, t_edge)
+                        Ex_inc = (ky / k0) * Hz_inc
+                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                            self.d_Ex_y[i, iy_hi - 1] += Ex_inc[i_off] / self.dy
 
                 # E injection (waveguide-y)
                 elif s['kind'] == 'waveguide-y':
@@ -1018,25 +1133,57 @@ class FDTD_2D_Hz:
             self.update_H()
             self.calculate_Curl_H()
 
-            # --- SF/TF H injection (by normal) ---
+            # --- SF/TF H injection (TF/SF interface) ---
             for s in self.sources:
-                if s["kind"] == 'sftf-y':
-                    # horizontal TF/SF (normal = y) → use dy/2, dt/2 stagger
-                    H_src = -self._g(s, t_index * self.dt + self.dy / (2 * self.c0) + self.dt / 2.0)
-                    y = s["iy0"]
-                    i0, i1 = s["ix0"], s["ix1"]
-                    for i in range(min(i0, i1), max(i0, i1)):
-                        if 0 <= y < self.Ny:
-                            self.d_Hz_y[i, y] -= (1.0 / self.dy) * H_src
+                if s["kind"] == 'sftf':
+                    ix_lo = s["ix_lo"]
+                    ix_hi = s["ix_hi"]
+                    iy_lo = s["iy_lo"]
+                    iy_hi = s["iy_hi"]
 
-                elif s["kind"] == 'sftf-x':
-                    # vertical TF/SF (normal = x) → use dx/2, dt/2 stagger
-                    H_src = -self._g(s, t_index * self.dt + self.dx / (2 * self.c0) + self.dt / 2.0)
-                    x = s["ix0"]
-                    j0, j1 = s["iy0"], s["iy1"]
-                    for j in range(min(j0, j1), max(j0, j1)):
-                        if 0 <= x < self.Nx:
-                            self.d_Hz_x[x, j] += (1.0 / self.dx) * H_src
+                    nx_side = ix_hi - ix_lo
+                    ny_side = iy_hi - iy_lo
+                    if nx_side <= 0 or ny_side <= 0:
+                        continue
+
+                    t_half = t_index * self.dt + self.dt / 2.0  # Hz is half-step in time
+                    kx = s["kx"]
+                    ky = s["ky"]
+                    k0 = s["k0"] + 1e-30
+
+                    # TEz: Hx = (ky/k0)*Hz, Hy = -(kx/k0)*Hz
+
+                    # --- Left edge: uses Hy, normal = -x ---
+                    if ix_lo < self.Nx:
+                        t_edge = t_half - s["delay_xlo"]
+                        Hz_inc = self._g(s, t_edge)
+                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                            if 0 <= j < self.Ny:
+                                self.d_Hz_x[ix_lo, j] += Hz_inc[j_off] / self.dx
+
+                    # --- Right edge: uses Hy, normal = +x ---
+                    if ix_hi < self.Nx:
+                        t_edge = t_half - s["delay_xhi"]
+                        Hz_inc = self._g(s, t_edge)
+                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                            if 0 <= j < self.Ny:
+                                self.d_Hz_x[ix_hi, j] -= Hz_inc[j_off] / self.dx
+
+                    # --- Bottom edge: uses Hx, normal = -y ---
+                    if iy_lo < self.Ny:
+                        t_edge = t_half - s["delay_ylo"]
+                        Hz_inc = self._g(s, t_edge)
+                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                            if 0 <= i < self.Nx:
+                                self.d_Hz_y[i, iy_lo] += Hz_inc[i_off] / self.dy
+
+                    # --- Top edge: uses Hx, normal = +y ---
+                    if iy_hi < self.Ny:
+                        t_edge = t_half - s["delay_yhi"]
+                        Hz_inc = self._g(s, t_edge)
+                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                            if 0 <= i < self.Nx:
+                                self.d_Hz_y[i, iy_hi] -= Hz_inc[i_off] / self.dy
 
                 # H injection (waveguide-y)
                 elif s["kind"] == 'waveguide-y':
@@ -1184,19 +1331,41 @@ class FDTD_2D_Hz:
         # --- draw sources as red markers/lines ---
         def draw_sources(ax):
             for s in self.sources:
-                # convert indices back to meters
-                x0 = s["ix0"] * self.dx
-                x1 = s["ix1"] * self.dx
-                y0 = s["iy0"] * self.dy
-                y1 = s["iy1"] * self.dy
-                if s["kind"] == 'point':
-                    ax.plot([x0], [y0], 'o', color='red', ms=5, mew=0)
+                k = s["kind"]
+
+                # TF/SF box: draw all four edges
+                if k == "sftf":
+                    ix_lo = int(s.get("ix_lo", min(s["ix0"], s["ix1"])))
+                    ix_hi = int(s.get("ix_hi", max(s["ix0"], s["ix1"])))
+                    iy_lo = int(s.get("iy_lo", min(s["iy0"], s["iy1"])))
+                    iy_hi = int(s.get("iy_hi", max(s["iy0"], s["iy1"])))
+
+                    x_lo = ix_lo * self.dx
+                    x_hi = ix_hi * self.dx
+                    y_lo = iy_lo * self.dy
+                    y_hi = iy_hi * self.dy
+
+                    # rectangle edges
+                    ax.plot([x_lo, x_hi], [y_lo, y_lo], '-', color='red', lw=2)  # bottom
+                    ax.plot([x_lo, x_hi], [y_hi, y_hi], '-', color='red', lw=2)  # top
+                    ax.plot([x_lo, x_lo], [y_lo, y_hi], '-', color='red', lw=2)  # left
+                    ax.plot([x_hi, x_hi], [y_lo, y_hi], '-', color='red', lw=2)  # right
+
                 else:
-                    # line-soft or sftf lines
-                    if s["ix0"] != s["ix1"]:  # horizontal
-                        ax.plot([x0, x1], [y0, y0], '-', color='red', lw=2)
-                    else:  # vertical
-                        ax.plot([x0, x0], [y0, y1], '-', color='red', lw=2)
+                    # convert indices back to meters
+                    x0 = s["ix0"] * self.dx
+                    x1 = s["ix1"] * self.dx
+                    y0 = s["iy0"] * self.dy
+                    y1 = s["iy1"] * self.dy
+
+                    if k == "point":
+                        ax.plot([x0], [y0], 'o', color='red', ms=5, mew=0)
+                    else:
+                        # line-soft, waveguides, legacy stuff
+                        if s["ix0"] != s["ix1"]:  # horizontal
+                            ax.plot([x0, x1], [y0, y0], '-', color='red', lw=2)
+                        else:  # vertical
+                            ax.plot([x0, x0], [y0, y1], '-', color='red', lw=2)
 
         draw_sources(ax_n)
 
