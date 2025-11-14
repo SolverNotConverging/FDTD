@@ -1,5 +1,4 @@
 import numpy as np
-from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
 
@@ -1078,9 +1077,9 @@ class FDTD_2D_Hz:
                         self_Ex = self.Ex[buf["_x"], buf["_sly"]]
                         self_Ey = self.Ey[buf["_x"], buf["_sly"]]
 
-                    buf["Ez"][k, :] = self_Hz
-                    buf["Hx"][k, :] = self_Ex
-                    buf["Hy"][k, :] = self_Ey
+                    buf["Hz"][k, :] = self_Hz
+                    buf["Ex"][k, :] = self_Ex
+                    buf["Ey"][k, :] = self_Ey
 
             # record
             if self.is_include_history and (t_index % self.record_stride) == 0:
@@ -1237,6 +1236,316 @@ class FDTD_2D_Hz:
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
 
+    def NF2FF(self, top, bottom, left, right, freqs, nphi=361):
+        """
+        2D NF->FF (TEz / H-mode) using four line monitors (top, bottom, left, right).
+        Each monitor index must refer to a line fully in free space (er=mr=1).
+
+        Args
+        ----
+        top, bottom, left, right : int
+            Indices into self.monitor_results for the four sides of the box.
+            'top'   : y = y_high (horizontal, x from x1->x2)
+            'bottom': y = y_low  (horizontal, x from x1->x2)
+            'left'  : x = x_low  (vertical,   y from y1->y2)
+            'right' : x = x_high (vertical,   y from y1->y2)
+        freqs : 1D array_like
+            Frequencies (Hz) at which to compute the FF pattern (θ fixed to 90°, sweep φ).
+        nphi : int
+            Number of angular samples for φ ∈ [0, 2π).
+
+        Returns
+        -------
+        ff : dict
+            Dictionary with keys:
+              - 'phi'   : (nphi,) angles in radians
+              - 'freqs' : (Nf,) frequencies
+              - 'Etheta','Ephi','Htheta','Hphi' : (Nf, nphi) complex far fields
+              - 'Ptheta','Pphi' : (Nf, nphi) time-average power densities
+        """
+        import numpy as np
+
+        # --- helper: DFT -> phasor vs frequency
+        def _phasor_time_series(series, t, freqs):
+            # Δt * Σ e^{-j2π f t} f(t)
+            t = np.asarray(t, float)  # (T,)
+            freqs = np.asarray(freqs, float)  # (Nf,)
+            dt = self.dt
+            K = np.exp(-1j * 2 * np.pi * freqs[:, None] * t[None, :]) * dt  # (Nf,T)
+            return K @ series  # (Nf,L)
+
+        # --- get monitors
+        M = self.monitor_results
+        mT = M[int(top)]
+        mB = M[int(bottom)]
+        mL = M[int(left)]
+        mR = M[int(right)]
+
+        # Expect orientations consistent with labels
+        if not (mT["orientation"] == "horizontal" and
+                mB["orientation"] == "horizontal" and
+                mL["orientation"] == "vertical" and
+                mR["orientation"] == "vertical"):
+            raise ValueError("Monitor orientations (top/bottom/left/right) are not as expected.")
+
+        # --- check that each line lies in free space (εr=μr=1)
+        def _check_free_space(m):
+            if m["orientation"] == "horizontal":
+                ix0, ix1 = m["ix0"], m["ix1"]
+                y = m["iy0"]
+                erx = self.ERxx[ix0:ix1, y]
+                ery = self.ERyy[ix0:ix1, y]
+                mz = self.MRzz[ix0:ix1, y]
+            else:  # vertical
+                x = m["ix0"]
+                iy0, iy1 = m["iy0"], m["iy1"]
+                erx = self.ERxx[x, iy0:iy1]
+                ery = self.ERyy[x, iy0:iy1]
+                mz = self.MRzz[x, iy0:iy1]
+
+            if not (np.allclose(erx, 1.0) and np.allclose(ery, 1.0) and np.allclose(mz, 1.0)):
+                raise ValueError("NF2FF requires monitors entirely in free space (ERxx=ERyy=MRzz=1).")
+
+        for m in (mT, mB, mL, mR):
+            _check_free_space(m)
+
+        # --- geometry / coordinates for phase factors
+        # Positions of sample points on each line (center of Yee cell)
+        # Top & bottom (horizontal)
+        xT = np.arange(mT["ix0"], mT["ix1"]) * self.dx
+        yT = np.full_like(xT, mT["iy0"] * self.dy, dtype=float)
+        xB = np.arange(mB["ix0"], mB["ix1"]) * self.dx
+        yB = np.full_like(xB, mB["iy0"] * self.dy, dtype=float)
+        # Right & left (vertical)
+        yR = np.arange(mR["iy0"], mR["iy1"]) * self.dy
+        xR = np.full_like(yR, mR["ix0"] * self.dx, dtype=float)
+        yL = np.arange(mL["iy0"], mL["iy1"]) * self.dy
+        xL = np.full_like(yL, mL["ix0"] * self.dx, dtype=float)
+
+        # Differential lengths for integration
+        dx = self.dx
+        dy = self.dy
+
+        # --- build time grids per monitor
+        tT = np.arange(mT["it0"], mT["it1"]) * self.dt
+        tB = np.arange(mB["it0"], mB["it1"]) * self.dt
+        tL = np.arange(mL["it0"], mL["it1"]) * self.dt
+        tR = np.arange(mR["it0"], mR["it1"]) * self.dt
+
+        # --- get time series arrays (T,L) for each side
+        # In TEz, monitors store Hz, Ex, Ey along the line
+        HzT, ExT, EyT = mT["Hz"], mT["Ex"], mT["Ey"]
+        HzB, ExB, EyB = mB["Hz"], mB["Ex"], mB["Ey"]
+        HzL, ExL, EyL = mL["Hz"], mL["Ex"], mL["Ey"]
+        HzR, ExR, EyR = mR["Hz"], mR["Ex"], mR["Ey"]
+
+        # --- phasors at requested freqs: (Nf, L)
+        freqs = np.asarray(freqs, float)
+
+        # Out-of-plane magnetic field Hz (scaled by η0, like Ez in TM code)
+        HzT_f = _phasor_time_series(HzT, tT, freqs) * self.eta0
+        HzB_f = _phasor_time_series(HzB, tB, freqs) * self.eta0
+        HzL_f = _phasor_time_series(HzL, tL, freqs) * self.eta0
+        HzR_f = _phasor_time_series(HzR, tR, freqs) * self.eta0
+
+        # In-plane electric fields (tangential components on each side)
+        ExT_f = _phasor_time_series(ExT, tT, freqs)
+        ExB_f = _phasor_time_series(ExB, tB, freqs)
+        ExL_f = _phasor_time_series(ExL, tL, freqs)
+        ExR_f = _phasor_time_series(ExR, tR, freqs)
+
+        EyT_f = _phasor_time_series(EyT, tT, freqs)
+        EyB_f = _phasor_time_series(EyB, tB, freqs)
+        EyL_f = _phasor_time_series(EyL, tL, freqs)
+        EyR_f = _phasor_time_series(EyR, tR, freqs)
+
+        # --- angular grid
+        phi = np.linspace(0.0, 2 * np.pi, int(nphi), endpoint=False)  # (nphi,)
+        cφ = np.cos(phi)[None, :]  # (1, nphi)
+        sφ = np.sin(phi)[None, :]
+
+        # --- phase factors e^{-jk rhat·r'} for each side (Nf,nφ,L)
+        k0 = 2 * np.pi * freqs[:, None] / self.c0  # (Nf,1)
+
+        def _phase_line(xline, yline):
+            # rhat·r' = x cosφ + y sinφ
+            return np.exp(-1j * (k0[..., None]) * (
+                    xline[None, None, :] * cφ[..., None] +
+                    yline[None, None, :] * sφ[..., None]
+            ))
+
+        PH_T = _phase_line(xT, yT)  # top
+        PH_B = _phase_line(xB, yB)  # bottom
+        PH_R = _phase_line(xR, yR)  # right
+        PH_L = _phase_line(xL, yL)  # left
+
+        # --- integral helpers along x or y
+        def _int_x(Fx, PH):  # integrate along x with dx
+            return np.sum(Fx[:, None, :] * PH, axis=2) * dx  # (Nf,nφ)
+
+        def _int_y(Fy, PH):  # integrate along y with dy
+            return np.sum(Fy[:, None, :] * PH, axis=2) * dy
+
+        # TEz version (dual of TMz):
+        # Nθ(φ) from tangential E fields (Ex on horizontal, Ey on vertical)
+        Nθ = (- _int_x(ExB_f, PH_B)
+              - _int_y(EyR_f, PH_R)
+              + _int_x(ExT_f, PH_T)
+              + _int_y(EyL_f, PH_L))  # (Nf,nφ)
+
+        # Lφ(φ) from out-of-plane Hz, with trig factors (dual of Ez in TM code)
+        Lφ = (- sφ * _int_x(HzB_f, PH_B)
+              + cφ * _int_y(HzR_f, PH_R)
+              + sφ * _int_x(HzT_f, PH_T)
+              - cφ * _int_y(HzL_f, PH_L))  # (Nf,nφ)
+
+        # --- Far fields (θ=90°) for TEz:
+        # By duality with TMz expressions:
+        #   Hθ = η Nθ + Lφ
+        #   Eφ = Lφ/η + Nθ
+        eta0 = self.eta0
+        Hθ = eta0 * Nθ + Lφ
+        Eφ = (Lφ / eta0) + Nθ
+
+        # zeros for the orthogonal components in 2D TEz
+        Z = np.zeros_like(Hθ)
+        Eθ = Z.copy()
+        Hφ = Z.copy()
+
+        # Power densities (per polarization)
+        Pθ = (np.abs(Eθ) ** 2) / (2.0 * eta0)  # zero in strict 2D TEz
+        Pφ = (np.abs(Eφ) ** 2) / (2.0 * eta0)
+
+        ff = dict(
+            phi=phi, freqs=freqs,
+            Etheta=Eθ, Ephi=Eφ,
+            Htheta=Hθ, Hphi=Hφ,
+            Ptheta=Pθ, Pphi=Pφ
+        )
+        return ff
+
+    def show_FF(self, ff, freq_idx=0, component="Etheta",
+                db=True, dr_db=40, normalize="max"):
+        """
+        Polar plot of a chosen far-field component vs φ.
+
+        Args
+        ----
+        ff : dict
+            Output from NF2FF() with keys: 'phi','freqs', and field/power arrays.
+        freq_idx : int or sequence of ints
+            Which frequency index/indices to plot (e.g. 0, -1, [0, 10, 20]).
+        component : {"Etheta","Ephi","Htheta","Hphi","Ptheta","Pphi"}
+            Quantity to plot on the polar axis.
+        db : bool
+            If True: plot in dB (after normalization).
+            If False: plot linear magnitude (optionally normalized).
+        dr_db : float
+            Dynamic range floor in dB when db=True (e.g., 40 → floor at −40 dB).
+        normalize : {"max","integral",None,False}
+            How to normalize each curve before plotting.
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        phi = np.asarray(ff["phi"])
+        freqs = np.asarray(ff["freqs"])
+        key = str(component)
+
+        if key not in ff:
+            raise KeyError(f"Component '{key}' not found in ff dict.")
+
+        data = np.asarray(ff[key])  # (Nf, nphi)
+
+        # --- parse frequency indices
+        if np.isscalar(freq_idx):
+            idx_list = [int(freq_idx)]
+        else:
+            idx_list = [int(i) for i in freq_idx]
+
+        # handle negative indices and clip
+        Nf = data.shape[0]
+        idx_clean = []
+        for i in idx_list:
+            if i < 0:
+                i = Nf + i
+            if 0 <= i < Nf:
+                idx_clean.append(i)
+        if not idx_clean:
+            raise ValueError("No valid freq_idx to plot.")
+
+        # --- normalization helpers
+        def _norm_curve(y):
+            if not normalize:
+                return y
+            if normalize == "max":
+                m = np.max(np.abs(y))
+                return y / m if m > 0 else y
+            if normalize == "integral":
+                # approximate integral over φ
+                integ = np.trapz(np.abs(y), phi)
+                return y / integ if integ > 0 else y
+            return y
+
+        def _to_db(y):
+            mag = np.abs(y)
+            # avoid log(0)
+            floor_lin = 10 ** (-dr_db / 20.0)
+            mag = np.maximum(mag, floor_lin)
+            val_db = 20.0 * np.log10(mag)
+            return np.maximum(val_db, -dr_db)
+
+        # --- plotting
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="polar")
+
+        handles = []
+        labels = []
+
+        for i in idx_clean:
+            y = data[i, :]
+            y = _norm_curve(y)
+
+            if db:
+                r = _to_db(y)
+            else:
+                r = np.abs(y)
+                if normalize:
+                    ax.set_rlim(0, 1.0)
+
+            h, = ax.plot(phi, r, lw=1.2)
+            handles.append(h)
+            labels.append(f"{freqs[i] / 1e9:.3f} GHz")
+
+        # radial limits / labels
+        if db:
+            ax.set_rlim(-dr_db, 0.0)
+            rlabel = "dB (normalized)"
+        else:
+            rlabel = "Magnitude (normalized)" if normalize else "Magnitude"
+
+        # polar axis formatting
+        ax.set_theta_zero_location("xaxis")  # 0° pointing +x
+        ax.set_theta_direction(-1)  # increase φ clockwise
+        ax.set_thetagrids(np.arange(0, 360, 30))
+
+        # Legend
+        ax.legend(handles, labels, loc="upper right", bbox_to_anchor=(1.15, 1.15),
+                  framealpha=0.8)
+
+        # Title: what we plotted
+        ax.set_title(f"{key} (φ)")
+
+        # radial "axis" label as annotation
+        ax.annotate(
+            rlabel, xy=(0.98, 0.02), xycoords="axes fraction",
+            ha="right", va="bottom", fontsize=9,
+            bbox=dict(facecolor="white", alpha=0.6, edgecolor="none")
+        )
+
+        fig.tight_layout()
+        plt.show()
+
     # ---------- state dict / I/O ----------
     def state_dict(self):
         """Return a shallow copy of the simulator's full state dictionary.
@@ -1275,7 +1584,7 @@ class FDTD_2D_Hz:
                     state[k] = type(state[k])()  # empty like its type
 
         # Write atomically: write to .part then replace
-        import tempfile, time, os, pickle
+        import tempfile, os, pickle
         d = os.path.dirname(os.path.abspath(path)) or "."
         base = os.path.basename(path)
         fd, tmp = tempfile.mkstemp(prefix=base + ".part.", dir=d)

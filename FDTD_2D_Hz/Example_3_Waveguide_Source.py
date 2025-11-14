@@ -7,8 +7,8 @@ sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 sim.add_rectangle(ER=[7, 7, 7], MR=1, y_position=(6e-3, 8e-3), x_position=(0e-3, 14e-3))
 sim.add_rectangle(ER=[8, 8, 8], MR=1, y_position=(0e-3, 14e-3), x_position=(6e-3, 8e-3))
 
-sim.add_source('waveguide-x', y=(4e-3, 10e-3), x=22, amplitude=1, mode_index=1, modes_to_show=3, is_show=1)
-sim.add_source('waveguide-y', x=(4e-3, 10e-3), y=22, amplitude=1.5, mode_index=2, modes_to_show=3, is_show=1)
+sim.add_source('waveguide-x', y=(3e-3, 11e-3), x=22, amplitude=1, mode_index=1, modes_to_show=3, is_show=1)
+sim.add_source('waveguide-y', x=(3e-3, 11e-3), y=22, amplitude=1.5, mode_index=2, modes_to_show=3, is_show=1)
 
 sim.run(record_stride=4)
 
