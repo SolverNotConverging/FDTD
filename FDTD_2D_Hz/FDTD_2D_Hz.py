@@ -661,12 +661,18 @@ class FDTD_2D_Hz:
 
         # --- extra parameters for TF/SF angled source ('sftf') ---
         if k == 'sftf':
+            if not np.isclose(self.dx, self.dy):
+                raise ValueError("'sftf' source requires square Yee cells (dx == dy).")
+
             # Require both x and y to be spans (non-zero length)
             if ix0 == ix1 or iy0 == iy1:
                 raise ValueError("For 'sftf', x and y must both be spans: x=(x_lo,x_hi), y=(y_lo,y_hi).")
             if angle is None:
                 raise ValueError("For 'sftf' you must provide angle (radians).")
             theta = float(angle)
+
+            if not self._tfsf_region_is_free_space(ix0, ix1, iy0, iy1):
+                raise ValueError("'sftf' source requires surrounding cells with eps_r=mu_r=1.")
 
             # k0, kx, ky (slide "Calculating kx and ky") :contentReference[oaicite:3]{index=3}
             kx = np.cos(theta)
@@ -826,6 +832,10 @@ class FDTD_2D_Hz:
           - vertical  : x = x0,       y = (y0, y1)
         x, y, t can be indices or meters/seconds. Spans can be 2-tuples/lists.
         Time indices are [it0, it1) (end-exclusive).
+
+        Recorded E-field components are averaged to the Yee cell centers and
+        time-aligned with Hz so that all samples describe the same physical
+        location and time.
         """
 
         def _to_index(val, step, N):
@@ -865,6 +875,51 @@ class FDTD_2D_Hz:
             "it0": it0, "it1": it1,
             "orientation": "horizontal" if is_h else "vertical",
         })
+
+    def _tfsf_region_is_free_space(self, ix0, ix1, iy0, iy1):
+        """Return True if the TF/SF ring lies entirely in free space."""
+        lo_x = max(0, min(ix0, ix1) - 1)
+        hi_x = min(self.Nx, max(ix0, ix1) + 1)
+        lo_y = max(0, min(iy0, iy1) - 1)
+        hi_y = min(self.Ny, max(iy0, iy1) + 1)
+
+        erx = self.ERxx[lo_x:hi_x, lo_y:hi_y]
+        ery = self.ERyy[lo_x:hi_x, lo_y:hi_y]
+        mz = self.MRzz[lo_x:hi_x, lo_y:hi_y]
+        return np.allclose(erx, 1.0) and np.allclose(ery, 1.0) and np.allclose(mz, 1.0)
+
+    def _avg_with_neighbor(self, arr, axis, periodic, direction):
+        """Average a Yee-staggered field with the neighbour shifted by *direction*."""
+        if direction not in (-1, 1):
+            raise ValueError("direction must be ±1")
+
+        out = np.empty_like(arr)
+        if axis == 0:
+            if direction == -1:
+                out[1:, :] = arr[:-1, :]
+                out[0, :] = arr[-1, :] if periodic else 0.0
+            else:
+                out[:-1, :] = arr[1:, :]
+                out[-1, :] = arr[0, :] if periodic else 0.0
+        elif axis == 1:
+            if direction == -1:
+                out[:, 1:] = arr[:, :-1]
+                out[:, 0] = arr[:, -1] if periodic else 0.0
+            else:
+                out[:, :-1] = arr[:, 1:]
+                out[:, -1] = arr[:, 0] if periodic else 0.0
+        else:
+            raise ValueError("axis must be 0 or 1")
+
+        return 0.5 * (arr + out)
+
+    def _avg_with_lower_neighbor(self, arr, axis, periodic):
+        """Convenience wrapper for averaging with the neighbour at index -1."""
+        return self._avg_with_neighbor(arr, axis, periodic, direction=-1)
+
+    def _avg_with_upper_neighbor(self, arr, axis, periodic):
+        """Convenience wrapper for averaging with the neighbour at index +1."""
+        return self._avg_with_neighbor(arr, axis, periodic, direction=+1)
 
     # ---------- spatial curls ----------
     def calculate_Curl_E(self):
@@ -948,6 +1003,9 @@ class FDTD_2D_Hz:
         self._init_Coeff()
         self.is_include_history = is_include_history
         Nx, Ny = self.Nx, self.Ny
+        per_x = hasattr(self, "periodic") and ('x' in self.periodic)
+        per_y = hasattr(self, "periodic") and ('y' in self.periodic)
+        Hz_prev = self.Hz.copy()
 
         # recording metadata
         self.record_stride = int(record_stride)
@@ -1170,22 +1228,26 @@ class FDTD_2D_Hz:
             # update E
             self.update_E()
 
+            if monitor_results:
+                Hz_center = 0.5 * (self.Hz + Hz_prev)
+                Ex_center = self._avg_with_upper_neighbor(self.Ex, axis=1, periodic=per_y)
+                Ey_center = self._avg_with_upper_neighbor(self.Ey, axis=0, periodic=per_x)
+
             # --- capture monitors at this step (no squeeze; direct 1D writes) ---
             for buf in monitor_results:
                 if buf["it0"] <= t_index < buf["it1"]:
                     k = t_index - buf["it0"]
                     if buf["orientation"] == "horizontal":
-                        self_Hz = self.Hz[buf["_slx"], buf["_y"]]
-                        self_Ex = self.Ex[buf["_slx"], buf["_y"]]
-                        self_Ey = self.Ey[buf["_slx"], buf["_y"]]
+                        buf["Hz"][k, :] = Hz_center[buf["_slx"], buf["_y"]]
+                        buf["Ex"][k, :] = Ex_center[buf["_slx"], buf["_y"]]
+                        buf["Ey"][k, :] = Ey_center[buf["_slx"], buf["_y"]]
                     else:  # vertical
-                        self_Hz = self.Hz[buf["_x"], buf["_sly"]]
-                        self_Ex = self.Ex[buf["_x"], buf["_sly"]]
-                        self_Ey = self.Ey[buf["_x"], buf["_sly"]]
+                        buf["Hz"][k, :] = Hz_center[buf["_x"], buf["_sly"]]
+                        buf["Ex"][k, :] = Ex_center[buf["_x"], buf["_sly"]]
+                        buf["Ey"][k, :] = Ey_center[buf["_x"], buf["_sly"]]
 
-                    buf["Hz"][k, :] = self_Hz
-                    buf["Ex"][k, :] = self_Ex
-                    buf["Ey"][k, :] = self_Ey
+            if monitor_results:
+                Hz_prev[:, :] = self.Hz
 
             # record
             if self.is_include_history and (t_index % self.record_stride) == 0:
@@ -1368,6 +1430,8 @@ class FDTD_2D_Hz:
         """
         2D NF->FF (TEz / H-mode) using four line monitors (top, bottom, left, right).
         Each monitor index must refer to a line fully in free space (er=mr=1).
+        The monitors are assumed to provide Hz, Ex, Ey that have already been
+        interpolated to the Yee cell centers and time-aligned by run().
 
         Args
         ----
@@ -1438,17 +1502,20 @@ class FDTD_2D_Hz:
             _check_free_space(m)
 
         # --- geometry / coordinates for phase factors
-        # Positions of sample points on each line (center of Yee cell)
+        # For TEz the contour samples sit at Yee cell centers (half-grid offsets in x,y)
+        # because Hz lives at (i+½, j+½) and Ex/Ey have been interpolated to that same
+        # location prior to saving monitor data.  All coordinates therefore include the
+        # +0.5 shift from the integer index.
         # Top & bottom (horizontal)
-        xT = np.arange(mT["ix0"], mT["ix1"]) * self.dx
-        yT = np.full_like(xT, mT["iy0"] * self.dy, dtype=float)
-        xB = np.arange(mB["ix0"], mB["ix1"]) * self.dx
-        yB = np.full_like(xB, mB["iy0"] * self.dy, dtype=float)
+        xT = (np.arange(mT["ix0"], mT["ix1"]) + 0.5) * self.dx
+        yT = np.full_like(xT, (mT["iy0"] + 0.5) * self.dy, dtype=float)
+        xB = (np.arange(mB["ix0"], mB["ix1"]) + 0.5) * self.dx
+        yB = np.full_like(xB, (mB["iy0"] + 0.5) * self.dy, dtype=float)
         # Right & left (vertical)
-        yR = np.arange(mR["iy0"], mR["iy1"]) * self.dy
-        xR = np.full_like(yR, mR["ix0"] * self.dx, dtype=float)
-        yL = np.arange(mL["iy0"], mL["iy1"]) * self.dy
-        xL = np.full_like(yL, mL["ix0"] * self.dx, dtype=float)
+        yR = (np.arange(mR["iy0"], mR["iy1"]) + 0.5) * self.dy
+        xR = np.full_like(yR, (mR["ix0"] + 0.5) * self.dx, dtype=float)
+        yL = (np.arange(mL["iy0"], mL["iy1"]) + 0.5) * self.dy
+        xL = np.full_like(yL, (mL["ix0"] + 0.5) * self.dx, dtype=float)
 
         # Differential lengths for integration
         dx = self.dx
