@@ -2,14 +2,14 @@ import numpy as np
 
 from FDTD_2D_Ez import FDTD_2D_Ez
 
-f_min, f_max = 60e9, 60e9
-sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=1000)
+f_min, f_max = 0e9, 60e9
+sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=1500)
 sim.periodic = ['']
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 
-sim.add_circle(ER=10, MR=1, center=(7e-3, 7e-3), radius=2e-3, nsub=6)
+sim.add_circle(ER=3, MR=1, center=(7e-3, 7e-3), radius=2e-3, nsub=6)
 
-theta = np.deg2rad(30.0)
+theta = np.deg2rad(45)
 sim.add_source(
     kind='sftf',
     x=(30, 110),

@@ -482,8 +482,8 @@ class FDTD_2D_Ez:
             Ez_modes.append(Ez)
             Hx_modes.append(Hx)
 
-        Ez_modes = np.asarray(Ez_modes) * amplitude
-        Hx_modes = np.asarray(Hx_modes) * amplitude
+        Ez_modes = np.asarray(Ez_modes)
+        Hx_modes = np.asarray(Hx_modes)
 
         return np.asarray(Ez_modes), np.asarray(Hx_modes), np.asarray(n_eff, dtype=float)
 
@@ -548,8 +548,8 @@ class FDTD_2D_Ez:
             Ez_modes.append(Ez)
             Hy_modes.append(Hy)
 
-        Ez_modes = np.asarray(Ez_modes) * amplitude
-        Hy_modes = np.asarray(Hy_modes) * amplitude
+        Ez_modes = np.asarray(Ez_modes)
+        Hy_modes = np.asarray(Hy_modes)
 
         return np.asarray(Ez_modes), np.asarray(Hy_modes), np.asarray(n_eff, dtype=float)
 
@@ -662,9 +662,6 @@ class FDTD_2D_Ez:
             if angle is None:
                 raise ValueError("For 'sftf' you must provide angle (radians).")
             theta = float(angle)
-
-            if not self._tfsf_region_is_free_space(ix0, ix1, iy0, iy1):
-                raise ValueError("'sftf' source requires surrounding cells with eps_r=mu_r=1.")
 
             # k0, kx, ky (slide "Calculating kx and ky") :contentReference[oaicite:3]{index=3}
             kx = np.cos(theta)
@@ -868,18 +865,6 @@ class FDTD_2D_Ez:
             "it0": it0, "it1": it1,
             "orientation": "horizontal" if is_h else "vertical",
         })
-
-    def _tfsf_region_is_free_space(self, ix0, ix1, iy0, iy1):
-        """Return True if the TF/SF bounding ring sits entirely in free space."""
-        lo_x = max(0, min(ix0, ix1) - 1)
-        hi_x = min(self.Nx, max(ix0, ix1) + 1)
-        lo_y = max(0, min(iy0, iy1) - 1)
-        hi_y = min(self.Ny, max(iy0, iy1) + 1)
-
-        er = self.ERzz[lo_x:hi_x, lo_y:hi_y]
-        mx = self.MRxx[lo_x:hi_x, lo_y:hi_y]
-        my = self.MRyy[lo_x:hi_x, lo_y:hi_y]
-        return np.allclose(er, 1.0) and np.allclose(mx, 1.0) and np.allclose(my, 1.0)
 
     def _avg_with_neighbor(self, arr, axis, periodic, direction):
         """Average a Yee-staggered field with the neighbour shifted by *direction*."""
@@ -1154,8 +1139,7 @@ class FDTD_2D_Ez:
                     # Left edge
                     if ix_lo < self.Nx:
                         t_edge = t_half - s["Hy_delay_xlo"]
-                        H0_xlo = self._g(s, t_edge)
-                        Hy_src_xlo = -(kx / k0) * H0_xlo
+                        Hy_src_xlo = -  (kx / k0) * self._g(s, t_edge)
                         for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
                             # x-derivative for Hy corresponds to d_Hy_x at ix_lo
                             self.d_Hy_x[ix_lo, j] -= Hy_src_xlo[j_off] / self.dx
@@ -1163,24 +1147,21 @@ class FDTD_2D_Ez:
                     # Right edge
                     if ix_hi < self.Nx:
                         t_edge = t_half - s["Hy_delay_xhi"]
-                        H0_xhi = self._g(s, t_edge)
-                        Hy_src_xhi = -(kx / k0) * H0_xhi
+                        Hy_src_xhi = -  (kx / k0) * self._g(s, t_edge)
                         for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
                             self.d_Hy_x[ix_hi + 1, j] += Hy_src_xhi[j_off] / self.dx
 
                     # Bottom edge (uses Hx)
                     if iy_lo < self.Ny:
                         t_edge = t_half - s["Hx_delay_ylo"]
-                        H0_ylo = self._g(s, t_edge)
-                        Hx_src_ylo = +(ky / k0) * H0_ylo
+                        Hx_src_ylo = (ky / k0) * self._g(s, t_edge)
                         for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
                             self.d_Hx_y[i, iy_lo] -= Hx_src_ylo[i_off] / self.dy
 
                     # Top edge
                     if iy_hi < self.Ny:
                         t_edge = t_half - s["Hx_delay_yhi"]
-                        H0_yhi = self._g(s, t_edge)
-                        Hx_src_yhi = +(ky / k0) * H0_yhi
+                        Hx_src_yhi = (ky / k0) * self._g(s, t_edge)
                         for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
                             self.d_Hx_y[i, iy_hi + 1] += Hx_src_yhi[i_off] / self.dy
 

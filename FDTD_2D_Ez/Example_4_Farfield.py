@@ -5,10 +5,9 @@ sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=200e9, f_ma
 sim.periodic = ['']
 sim.add_PML(pml_width=20, direction='xy')
 
-sim.add_circle(ER=5, MR=1, center=(7e-3, 8e-3), radius=1.25e-3, nsub=6)
 sim.add_rectangle(ER=[4, 4, 4], MR=1, x_position=(6e-3, 8e-3), y_position=(6e-3, 8e-3))
 
-sim.add_source('waveguide-y', x=(2e-3, 12e-3), y=6.1e-3, amplitude=2, mode_index=2, modes_to_show=4)
+sim.add_source('waveguide-y', x=(2e-3, 12e-3), y=6.1e-3, amplitude=1, mode_index=2, modes_to_show=4)
 
 sim.add_line_monitor(x=(21, 119), y=119)
 sim.add_line_monitor(x=(21, 119), y=21)

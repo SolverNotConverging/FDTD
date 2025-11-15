@@ -16,4 +16,4 @@ sim.run(record_stride=1)
 sim.save("fdtd_run.pkl", include_histories=True)
 
 # Dynamic color scaling in the animation (smoothed to reduce flicker)
-sim.show_animation(fps=120, dynamic_clim=True, clim_smooth=0.25)
+sim.show_animation(fps=120, dynamic_clim=False, clim_smooth=0.25)

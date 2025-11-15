@@ -478,7 +478,7 @@ class FDTD_2D_Hz:
             Ex = Ex.real
 
             # Normalize Ex to max|.| = amplitude
-            norm = amplitude / np.max(np.abs(Ex))
+            norm = 1 / np.max(np.abs(Ex))
             Ex = Ex * norm
             Hz = Hz * norm
 
@@ -546,7 +546,7 @@ class FDTD_2D_Hz:
             Ey = Ey.A.squeeze() if hasattr(Ey, "A") else np.asarray(Ey).squeeze()
             Ey = Ey.real
 
-            norm = amplitude / np.max(np.abs(Ey))
+            norm = 1 / np.max(np.abs(Ey))
 
             Ey = Ey * norm
             Hz = Hz * norm
@@ -670,9 +670,6 @@ class FDTD_2D_Hz:
             if angle is None:
                 raise ValueError("For 'sftf' you must provide angle (radians).")
             theta = float(angle)
-
-            if not self._tfsf_region_is_free_space(ix0, ix1, iy0, iy1):
-                raise ValueError("'sftf' source requires surrounding cells with eps_r=mu_r=1.")
 
             # k0, kx, ky (slide "Calculating kx and ky") :contentReference[oaicite:3]{index=3}
             kx = np.cos(theta)
@@ -875,18 +872,6 @@ class FDTD_2D_Hz:
             "it0": it0, "it1": it1,
             "orientation": "horizontal" if is_h else "vertical",
         })
-
-    def _tfsf_region_is_free_space(self, ix0, ix1, iy0, iy1):
-        """Return True if the TF/SF ring lies entirely in free space."""
-        lo_x = max(0, min(ix0, ix1) - 1)
-        hi_x = min(self.Nx, max(ix0, ix1) + 1)
-        lo_y = max(0, min(iy0, iy1) - 1)
-        hi_y = min(self.Ny, max(iy0, iy1) + 1)
-
-        erx = self.ERxx[lo_x:hi_x, lo_y:hi_y]
-        ery = self.ERyy[lo_x:hi_x, lo_y:hi_y]
-        mz = self.MRzz[lo_x:hi_x, lo_y:hi_y]
-        return np.allclose(erx, 1.0) and np.allclose(ery, 1.0) and np.allclose(mz, 1.0)
 
     def _avg_with_neighbor(self, arr, axis, periodic, direction):
         """Average a Yee-staggered field with the neighbour shifted by *direction*."""
@@ -1135,6 +1120,7 @@ class FDTD_2D_Hz:
 
             self.calcualte_Psi_B()
             self.update_B()
+
             # --- soft sources (point/line-soft) into Dz ---
             t_now = t_index * self.dt
             for s in self.sources:
