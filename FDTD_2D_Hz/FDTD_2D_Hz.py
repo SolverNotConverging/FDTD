@@ -659,80 +659,48 @@ class FDTD_2D_Hz:
         tt = np.arange(0, self.Nt * self.dt, self.dt)
         self.avg_freqs.append(self._spec_centroid(self._g(s, tt)))
 
-        # --- extra parameters for angled TF/SF source ('sftf') ---
+        # --- extra parameters for TF/SF angled source ('sftf') ---
         if k == 'sftf':
-            # Require spans in both x and y
+            # Require both x and y to be spans (non-zero length)
             if ix0 == ix1 or iy0 == iy1:
                 raise ValueError("For 'sftf', x and y must both be spans: x=(x_lo,x_hi), y=(y_lo,y_hi).")
-
             if angle is None:
                 raise ValueError("For 'sftf' you must provide angle (radians).")
-
             theta = float(angle)
 
-            # Choose a center frequency f0 for kx, ky
-            if fmin is not None and fmax is not None:
-                f0 = 0.5 * (fmin + fmax)
-            else:
-                f0 = fmax
-            f0 = float(f0)
-            omega0 = 2.0 * np.pi * f0
+            # k0, kx, ky (slide "Calculating kx and ky") :contentReference[oaicite:3]{index=3}
+            kx = np.cos(theta)
+            ky = np.sin(theta)
 
-            # Effective index in TF region (TEz: use MRzz & avg(ERxx, ERyy))
-            i_lo, i_hi = min(ix0, ix1), max(ix0, ix1)
-            j_lo, j_hi = min(iy0, iy1), max(iy0, iy1)
-            if i_hi > self.Nx: i_hi = self.Nx
-            if j_hi > self.Ny: j_hi = self.Ny
-
-            erxx_slice = self.ERxx[i_lo:i_hi, j_lo:j_hi]
-            eryy_slice = self.ERyy[i_lo:i_hi, j_lo:j_hi]
-            mz_slice = self.MRzz[i_lo:i_hi, j_lo:j_hi]
-
-            if erxx_slice.size == 0 or eryy_slice.size == 0 or mz_slice.size == 0:
-                n_src = 1.0
-            else:
-                eps_avg_slice = 0.5 * (erxx_slice + eryy_slice)
-                n_src = float(np.sqrt(np.mean(eps_avg_slice * mz_slice)))
-
-            # k0, kx, ky for the plane wave
-            k0 = n_src * omega0 / self.c0
-            kx = k0 * np.cos(theta)
-            ky = k0 * np.sin(theta)
-
+            # Precompute time-delays δ = (kx x + ky y)/ω for each edge sample (Gaussian / CW plane wave) :contentReference[oaicite:4]{index=4}
             dx, dy = self.dx, self.dy
 
-            # Hz is at cell centers: (i+0.5)*dx, (j+0.5)*dy.
-            xs_c = (np.arange(i_lo, i_hi) + 0.5) * dx
-            ys_c = (np.arange(j_lo, j_hi) + 0.5) * dy
+            # interior indices interpreted as [ix0, ix1), [iy0, iy1)
+            # Use cell-center coordinates for delay calculation
+            xs = np.arange(ix0, ix1 + 1)
+            ys = np.arange(iy0, iy1 + 1)
 
-            # Left/right Hz edges
-            xL = (i_lo - 0.5) * dx
-            xR = (i_hi + 0.5) * dx
-            delay_xlo = (kx * xL + ky * ys_c) / omega0  # shape (ny_side,)
-            delay_xhi = (kx * xR + ky * ys_c) / omega0
+            Hz_delay_xlo = (kx * ix0 * dx + ky * ys * dy) / self.c0
+            Ey_delay_xlo = (kx * (ix0 + 0.5) * dx + ky * ys * dy) / self.c0
 
-            # Bottom/top Hz edges
-            yB = (j_lo - 0.5) * dy
-            yT = (j_hi + 0.5) * dy
-            delay_ylo = (kx * xs_c + ky * yB) / omega0  # shape (nx_side,)
-            delay_yhi = (kx * xs_c + ky * yT) / omega0
+            Hz_delay_xhi = (kx * (ix1 + 1) * dx + ky * ys * dy) / self.c0
+            Ey_delay_xhi = (kx * (ix1 + 1.5) * dx + ky * ys * dy) / self.c0
 
-            # For angle = 0 → ky = 0, so delay_xlo/xhi are constant in y (no tilt).
+            Hz_delay_ylo = (kx * xs * dx + ky * iy0 * dy) / self.c0
+            Ex_delay_ylo = (kx * xs * dx + ky * (iy0 + 0.5) * dy) / self.c0
+
+            Hz_delay_yhi = (kx * xs * dx + ky * (iy1 + 1) * dy) / self.c0
+            Ex_delay_yhi = (kx * xs * dx + ky * (iy1 + 1.5) * dy) / self.c0
 
             s["angle"] = theta
-            s["f0"] = f0
-            s["omega0"] = omega0
-            s["kx"] = kx
-            s["ky"] = ky
-            s["k0"] = k0
-            s["delay_xlo"] = delay_xlo
-            s["delay_xhi"] = delay_xhi
-            s["delay_ylo"] = delay_ylo
-            s["delay_yhi"] = delay_yhi
-            s["ix_lo"] = i_lo
-            s["ix_hi"] = i_hi
-            s["iy_lo"] = j_lo
-            s["iy_hi"] = j_hi
+            s["Hz_delay_xlo"] = Hz_delay_xlo
+            s['Ey_delay_xlo'] = Ey_delay_xlo
+            s['Hz_delay_xhi'] = Hz_delay_xhi
+            s['Ey_delay_xhi'] = Ey_delay_xhi
+            s['Hz_delay_ylo'] = Hz_delay_ylo
+            s['Ex_delay_ylo'] = Ex_delay_ylo
+            s['Hz_delay_yhi'] = Hz_delay_yhi
+            s['Ex_delay_yhi'] = Ex_delay_yhi
 
         # --- waveguide port (horizontal, normal = y) ---
         if k == 'waveguide-y':
@@ -1046,10 +1014,10 @@ class FDTD_2D_Hz:
             # --- SF/TF E injection (by normal) ---
             for s in self.sources:
                 if s["kind"] == 'sftf':
-                    ix_lo = s["ix_lo"]
-                    ix_hi = s["ix_hi"]
-                    iy_lo = s["iy_lo"]
-                    iy_hi = s["iy_hi"]
+                    ix_lo = s["ix0"]
+                    ix_hi = s["ix1"]
+                    iy_lo = s["iy0"]
+                    iy_hi = s["iy1"]
 
                     nx_side = ix_hi - ix_lo
                     ny_side = iy_hi - iy_lo
@@ -1057,41 +1025,37 @@ class FDTD_2D_Hz:
                         continue
 
                     t_now = t_index * self.dt
-                    kx = s["kx"]
-                    ky = s["ky"]
-                    k0 = s["k0"] + 1e-30
+                    kx = np.cos(s["angle"])
+                    ky = np.sin(s["angle"])
+                    k0 = 1
 
                     # --- Left edge: Ey tangential, normal = -x ---
                     if ix_lo - 1 >= 0:
-                        t_edge = t_now - s["delay_xlo"]  # vector over j
-                        Hz_inc = self._g(s, t_edge)
-                        Ey_inc = -(kx / k0) * Hz_inc  # TEz plane-wave relation
-                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                        t_edge = t_now - s["Ey_delay_xlo"]  # vector over j
+                        Ey_inc = (kx / k0) * self._g(s, t_edge)  # TEz plane-wave relation
+                        for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
                             self.d_Ey_x[ix_lo - 1, j] -= Ey_inc[j_off] / self.dx
 
                     # --- Right edge: Ey tangential, normal = +x ---
                     if ix_hi - 1 >= 0 and ix_hi - 1 < self.Nx:
-                        t_edge = t_now - s["delay_xhi"]
-                        Hz_inc = self._g(s, t_edge)
-                        Ey_inc = -(kx / k0) * Hz_inc
-                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
-                            self.d_Ey_x[ix_hi - 1, j] += Ey_inc[j_off] / self.dx
+                        t_edge = t_now - s["Ey_delay_xhi"]
+                        Ey_inc = (kx / k0) * self._g(s, t_edge)
+                        for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
+                            self.d_Ey_x[ix_hi, j] += Ey_inc[j_off] / self.dx
 
                     # --- Bottom edge: Ex tangential, normal = -y ---
                     if iy_lo - 1 >= 0:
-                        t_edge = t_now - s["delay_ylo"]  # vector over i
-                        Hz_inc = self._g(s, t_edge)
-                        Ex_inc = (ky / k0) * Hz_inc
-                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                        t_edge = t_now - s["Ex_delay_ylo"]  # vector over i
+                        Ex_inc = -(ky / k0) * self._g(s, t_edge)
+                        for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
                             self.d_Ex_y[i, iy_lo - 1] -= Ex_inc[i_off] / self.dy
 
                     # --- Top edge: Ex tangential, normal = +y ---
                     if iy_hi - 1 >= 0 and iy_hi - 1 < self.Ny:
-                        t_edge = t_now - s["delay_yhi"]
-                        Hz_inc = self._g(s, t_edge)
-                        Ex_inc = (ky / k0) * Hz_inc
-                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
-                            self.d_Ex_y[i, iy_hi - 1] += Ex_inc[i_off] / self.dy
+                        t_edge = t_now - s["Ex_delay_yhi"]
+                        Ex_inc = -(ky / k0) * self._g(s, t_edge)
+                        for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
+                            self.d_Ex_y[i, iy_hi] += Ex_inc[i_off] / self.dy
 
                 # E injection (waveguide-y)
                 elif s['kind'] == 'waveguide-y':
@@ -1136,10 +1100,10 @@ class FDTD_2D_Hz:
             # --- SF/TF H injection (TF/SF interface) ---
             for s in self.sources:
                 if s["kind"] == 'sftf':
-                    ix_lo = s["ix_lo"]
-                    ix_hi = s["ix_hi"]
-                    iy_lo = s["iy_lo"]
-                    iy_hi = s["iy_hi"]
+                    ix_lo = s["ix0"]
+                    ix_hi = s["ix1"]
+                    iy_lo = s["iy0"]
+                    iy_hi = s["iy1"]
 
                     nx_side = ix_hi - ix_lo
                     ny_side = iy_hi - iy_lo
@@ -1147,43 +1111,38 @@ class FDTD_2D_Hz:
                         continue
 
                     t_half = t_index * self.dt + self.dt / 2.0  # Hz is half-step in time
-                    kx = s["kx"]
-                    ky = s["ky"]
-                    k0 = s["k0"] + 1e-30
-
-                    # TEz: Hx = (ky/k0)*Hz, Hy = -(kx/k0)*Hz
 
                     # --- Left edge: uses Hy, normal = -x ---
                     if ix_lo < self.Nx:
-                        t_edge = t_half - s["delay_xlo"]
+                        t_edge = t_half - s["Hz_delay_xlo"]
                         Hz_inc = self._g(s, t_edge)
-                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                        for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
                             if 0 <= j < self.Ny:
-                                self.d_Hz_x[ix_lo, j] += Hz_inc[j_off] / self.dx
+                                self.d_Hz_x[ix_lo, j] -= Hz_inc[j_off] / self.dx
 
                     # --- Right edge: uses Hy, normal = +x ---
                     if ix_hi < self.Nx:
-                        t_edge = t_half - s["delay_xhi"]
+                        t_edge = t_half - s["Hz_delay_xhi"]
                         Hz_inc = self._g(s, t_edge)
-                        for j_off, j in enumerate(range(iy_lo, iy_hi)):
+                        for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
                             if 0 <= j < self.Ny:
-                                self.d_Hz_x[ix_hi, j] -= Hz_inc[j_off] / self.dx
+                                self.d_Hz_x[ix_hi + 1, j] += Hz_inc[j_off] / self.dx
 
                     # --- Bottom edge: uses Hx, normal = -y ---
                     if iy_lo < self.Ny:
-                        t_edge = t_half - s["delay_ylo"]
+                        t_edge = t_half - s["Hz_delay_ylo"]
                         Hz_inc = self._g(s, t_edge)
-                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                        for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
                             if 0 <= i < self.Nx:
-                                self.d_Hz_y[i, iy_lo] += Hz_inc[i_off] / self.dy
+                                self.d_Hz_y[i, iy_lo] -= Hz_inc[i_off] / self.dy
 
                     # --- Top edge: uses Hx, normal = +y ---
                     if iy_hi < self.Ny:
-                        t_edge = t_half - s["delay_yhi"]
+                        t_edge = t_half - s["Hz_delay_yhi"]
                         Hz_inc = self._g(s, t_edge)
-                        for i_off, i in enumerate(range(ix_lo, ix_hi)):
+                        for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
                             if 0 <= i < self.Nx:
-                                self.d_Hz_y[i, iy_hi] -= Hz_inc[i_off] / self.dy
+                                self.d_Hz_y[i, iy_hi + 1] += Hz_inc[i_off] / self.dy
 
                 # H injection (waveguide-y)
                 elif s["kind"] == 'waveguide-y':
