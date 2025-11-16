@@ -1246,7 +1246,7 @@ class FDTD_2D_Ez:
 
         # ---------- animation ----------
 
-    def show_animation(self, fps=10, dynamic_clim=True, clim_smooth=0.2, pad=1e-12):
+    def show_animation(self, fps=10, dynamic_clim=True, clim_smooth=0.2, pad=1e-12, n_max=5):
         """
         2x2: [ n-map , Hx ]
              [  Hy   , Ez ]
@@ -1282,7 +1282,7 @@ class FDTD_2D_Ez:
 
         # n-map
         im_n = ax_n.imshow(n_map.T, origin="lower", aspect="auto", extent=extent, cmap="viridis")
-        im_n.set_clim(np.min(n_map), np.max(n_map))
+        im_n.set_clim(np.min(n_map), min(n_max, np.max(n_map)))
         fig.colorbar(im_n, ax=ax_n).set_label("n")
         ax_n.set_title("Refractive index")
         ax_n.set_xlabel("x (m)")
@@ -1375,6 +1375,29 @@ class FDTD_2D_Ez:
 
         draw_sources(ax_n)
 
+        # --- draw line monitors as green dashed lines ---
+        def draw_monitors(ax):
+            if not hasattr(self, "monitors"):
+                return
+            for m in self.monitors:
+                ix0, ix1 = int(m["ix0"]), int(m["ix1"])
+                iy0, iy1 = int(m["iy0"]), int(m["iy1"])
+                orient = str(m.get("orientation", "")).lower()
+
+                x0 = ix0 * self.dx
+                x1 = ix1 * self.dx
+                y0 = iy0 * self.dy
+                y1 = iy1 * self.dy
+
+                # horizontal monitor: x spans, y fixed
+                if orient == "horizontal" or (ix0 != ix1 and iy0 == iy1):
+                    ax.plot([x0, x1], [y0, y0], '--', color='green', lw=1.5)
+                # vertical monitor: y spans, x fixed
+                elif orient == "vertical" or (ix0 == ix1 and iy0 != iy1):
+                    ax.plot([x0, x0], [y0, y1], '--', color='green', lw=1.5)
+
+        draw_monitors(ax_n)
+
         # clims
         if dynamic_clim:
             frame0_max = max(np.max(np.abs(self.Hx_history[0])) + pad,
@@ -1411,7 +1434,7 @@ class FDTD_2D_Ez:
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
 
-    def NF2FF(self, top, bottom, left, right, freqs, nphi=361):
+    def NF2FF(self, top, bottom, left, right, freqs, nphi=361, src_index=None):
         """
         2D NF->FF (TMz / E-mode) using four line monitors (top, bottom, left, right).
         Each monitor index must refer to a line fully in free space (er=mr=1).
@@ -1430,6 +1453,12 @@ class FDTD_2D_Ez:
             Frequencies (Hz) at which to compute the FF pattern (θ fixed to 90°, sweep φ).
         nphi : int
             Number of φ samples (0..2π). Default 361.
+        src_index : int or None
+            If not None, index into self.sources that will be used to compute
+            the source spectrum G(f) = Fourier{g(t)} for normalizing the far fields.
+            If None:
+              - if there is exactly one source in self.sources, that one is used;
+              - otherwise, no normalization is applied.
 
         Returns
         -------
@@ -1471,24 +1500,6 @@ class FDTD_2D_Ez:
             ori = m.get("orientation", "").lower()
             if ori != need:
                 raise ValueError(f"Monitor {midx} must be {need}, got '{ori}'.")
-
-        # --- free-space checks (er=mr=1 on each line)
-        def _check_free_space(m):
-            if m["orientation"] == "horizontal":
-                ix0, ix1, y = m["ix0"], m["ix1"], m["iy0"]
-                er = self.ERzz[ix0:ix1, y]
-                mx = self.MRxx[ix0:ix1, y]
-                my = self.MRyy[ix0:ix1, y]
-            else:
-                x, iy0, iy1 = m["ix0"], m["iy0"], m["iy1"]
-                er = self.ERzz[x, iy0:iy1]
-                mx = self.MRxx[x, iy0:iy1]
-                my = self.MRyy[x, iy0:iy1]
-            if not (np.allclose(er, 1.0) and np.allclose(mx, 1.0) and np.allclose(my, 1.0)):
-                raise ValueError("All four NF2FF monitors must lie entirely in free space (er=mr=1).")
-
-        for m in (mT, mB, mL, mR):
-            _check_free_space(m)
 
         # --- geometry / coordinates for phase factors
         # For TMz we interpret the NF contour as lying on the Yee cell edges, i.e.
@@ -1595,12 +1606,52 @@ class FDTD_2D_Ez:
         Eθ = eta0 * Nθ + Lφ
         Hφ = (Lφ / eta0) + Nθ
 
+        # --- normalize by source spectrum G(f) = Fourier{g(t)} if available/requested ---
+        G = None  # store spectrum if we compute it
+
+        src_to_use = None
+        if hasattr(self, "sources") and len(self.sources) > 0:
+            if src_index is None:
+                # auto-pick only if exactly one source
+                if len(self.sources) == 1:
+                    src_to_use = self.sources[0]
+            else:
+                src_index = int(src_index)
+                if not (0 <= src_index < len(self.sources)):
+                    raise IndexError(f"src_index {src_index} out of range for {len(self.sources)} sources.")
+                src_to_use = self.sources[src_index]
+
+        if src_to_use is not None:
+            t_src = np.arange(self.Nt) * self.dt  # (Nt,)
+            g_t = self._g(src_to_use, t_src)  # (Nt,)
+
+            # Same DFT convention as for fields
+            G = _phasor_time_series(g_t[:, None], t_src, freqs).ravel()  # (Nf,)
+
+            magG = np.abs(G)
+            if np.any(magG):
+                Gmax = magG.max()
+                if Gmax > 0.0:
+                    thresh = 1e-6 * Gmax
+                    mask_good = magG >= thresh  # (Nf,)
+
+                    # divide only where G(f) is "good"
+                    if np.any(mask_good):
+                        Eθ[mask_good, :] /= G[mask_good, None]
+                        Hφ[mask_good, :] /= G[mask_good, None]
+
+                    # for frequencies where source has negligible energy,
+                    # just zero out the fields (no meaningful normalization)
+                    Eθ[~mask_good, :] = 0.0
+                    Hφ[~mask_good, :] = 0.0
+
         # zeros for the orthogonal components in 2D TMz
         Z = np.zeros_like(Eθ)
         Eφ = Z.copy()
         Hθ = Z.copy()
 
         # Power densities (per polarization)
+        # NOTE: Pθ is now effectively divided by |G(f)|^2 because Eθ was divided by G(f).
         Pθ = (np.abs(Eθ) ** 2) / (2.0 * eta0)
         Pφ = (np.abs(Eφ) ** 2) / (2.0 * eta0)  # zero
 
@@ -1608,8 +1659,9 @@ class FDTD_2D_Ez:
             phi=phi, freqs=freqs,
             Etheta=Eθ, Ephi=Eφ,
             Htheta=Hθ, Hphi=Hφ,
-            Ptheta=Pθ, Pphi=Pφ
+            Ptheta=Pθ, Pphi=Pφ,
         )
+
         return ff
 
     def show_FF(self, ff, freq_idx=0, component="Etheta", db=True, dr_db=40, normalize="max"):
@@ -1672,8 +1724,10 @@ class FDTD_2D_Ez:
         # --- global max over all selected beams for normalize == "max"
         if normalize == "max":
             sel = data[idx_eff, :]  # (N_sel, nphi)
-            global_max = np.max(np.abs(sel))
-            if global_max <= 0:
+            # ignore NaNs when computing max
+            with np.errstate(invalid="ignore"):
+                global_max = np.nanmax(np.abs(sel))
+            if (not np.isfinite(global_max)) or global_max <= 0:
                 global_max = None
         else:
             global_max = None
@@ -1682,13 +1736,15 @@ class FDTD_2D_Ez:
         def _norm_curve(y):
             y = np.asarray(y)
             if normalize == "max":
-                # global max across all selected beams
                 if global_max is None:
                     return y
                 return y / global_max
             elif normalize == "integral":
-                # RMS (per curve)
-                s = np.sqrt(np.mean(np.abs(y) ** 2)) or 1.0
+                # RMS per curve, again ignoring NaNs
+                with np.errstate(invalid="ignore"):
+                    s = np.sqrt(np.nanmean(np.abs(y) ** 2))
+                if (not np.isfinite(s)) or s == 0:
+                    s = 1.0
                 return y / s
             else:
                 return y

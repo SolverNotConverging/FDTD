@@ -2,14 +2,14 @@ import numpy as np
 
 from FDTD_2D_Ez import FDTD_2D_Ez
 
-f_min, f_max = 0e9, 60e9
-sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=1500)
+f_min, f_max = 0e9, 50e9
+sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=2000)
 sim.periodic = ['']
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 
-sim.add_circle(ER=3, MR=1, center=(7e-3, 7e-3), radius=2e-3, nsub=6)
+sim.add_circle(ER=6, MR=1, center=(7e-3, 7e-3), radius=2e-3, nsub=6)
 
-theta = np.deg2rad(45)
+theta = np.deg2rad(0)
 sim.add_source(
     kind='sftf',
     x=(30, 110),
@@ -33,8 +33,8 @@ sim.save("fdtd_run.pkl", include_histories=True)
 
 # Dynamic color scaling in the animation (smoothed to reduce flicker)
 sim.show_animation(fps=60, dynamic_clim=False, clim_smooth=0.25)
-freqs = np.linspace(f_min, f_max, 5)
-ff = sim.NF2FF(top=0, bottom=1, left=2, right=3, freqs=freqs, nphi=3600)
+freqs = np.linspace(f_min, f_max, 10)
+ff = sim.NF2FF(top=0, bottom=1, left=2, right=3, freqs=freqs, nphi=3600, src_index=0)
 
 # plot at a few frequencies
-sim.show_FF(ff, freq_idx=np.arange(0, 5), component='Etheta')  # first frequency
+sim.show_FF(ff, freq_idx=np.arange(0, 10), component='Etheta')  # first frequency
