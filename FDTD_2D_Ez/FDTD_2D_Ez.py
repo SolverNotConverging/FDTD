@@ -1629,9 +1629,9 @@ class FDTD_2D_Ez:
         dr_db : float
             Dynamic range floor in dB when db=True (e.g., 40 → floor at −40 dB).
         normalize : {"max","integral",None}
-            Per-curve normalization before plotting:
-              - "max"      : divide by max(|y|) over φ for that curve
-              - "integral" : divide by sqrt(mean(|y|^2)) over φ (RMS)
+            Normalization before plotting:
+              - "max"      : divide by global max(|y|) over φ across all selected beams
+              - "integral" : divide by sqrt(mean(|y|^2)) over φ (RMS) per curve
               - None       : no normalization
         """
         import numpy as np
@@ -1655,33 +1655,51 @@ class FDTD_2D_Ez:
             idx_list = [int(i) for i in freq_idx]
         else:
             idx_list = [int(freq_idx)]
-        # clip/validate indices and build labels
+
+        # clip/validate indices
         Nf = data.shape[0]
         for i in idx_list:
             if not (-Nf <= i < Nf):
                 raise IndexError(f"freq_idx {i} out of range for Nf={Nf}")
 
+        # Effective (non-negative) indices
+        idx_eff = [i % Nf for i in idx_list]
+
         # Decide dB rule: fields use 20*log10, powers use 10*log10
         is_power = key.startswith("P")
         log_factor = 10.0 if is_power else 20.0
 
-        # Per-curve normalization helper
+        # --- global max over all selected beams for normalize == "max"
+        if normalize == "max":
+            sel = data[idx_eff, :]  # (N_sel, nphi)
+            global_max = np.max(np.abs(sel))
+            if global_max <= 0:
+                global_max = None
+        else:
+            global_max = None
+
+        # Normalization helper
         def _norm_curve(y):
             y = np.asarray(y)
             if normalize == "max":
-                s = np.max(np.abs(y)) or 1.0
+                # global max across all selected beams
+                if global_max is None:
+                    return y
+                return y / global_max
             elif normalize == "integral":
+                # RMS (per curve)
                 s = np.sqrt(np.mean(np.abs(y) ** 2)) or 1.0
+                return y / s
             else:
-                s = 1.0
-            return y / s
+                return y
 
-        # dB conversion with floor
+        # dB conversion with floor (NO per-curve renormalization here)
         def _to_db(y):
             y = np.abs(y)
-            # Always normalize to own max before dB floor so curves share 0 dB reference
-            y = y / (np.max(y) or 1.0)
-            return log_factor * np.log10(np.maximum(y, 10 ** (-dr_db / log_factor)))
+            floor_lin = 10 ** (-dr_db / log_factor)
+            y = np.maximum(y, floor_lin)
+            val_db = log_factor * np.log10(y)
+            return np.maximum(val_db, -dr_db)
 
         # --- figure: single polar plot
         fig = plt.figure(figsize=(6.8, 5.4))
@@ -1690,28 +1708,31 @@ class FDTD_2D_Ez:
         ax.set_theta_zero_location("E")  # 0° at +x (East)
         ax.set_theta_direction(1)  # CCW
 
-        # plot each requested frequency slice
         handles = []
         labels = []
-        for i in idx_list:
-            i_eff = i % Nf
-            y = data[i_eff, :]  # (nphi,)
-            y = _norm_curve(y)  # apply chosen normalization
+
+        # plot each requested frequency slice
+        for i, j in zip(idx_list, idx_eff):
+            y = data[j, :]  # (nphi,)
+            y = _norm_curve(y)  # apply chosen (global) normalization
 
             if db:
                 r = _to_db(y)
                 ax.set_rlim(-dr_db, 0)  # fixed dB range
-                rlabel = "dB (normalized)"
+                rlabel = "dB"
+                if normalize:
+                    rlabel += " (normalized)"
             else:
                 r = np.abs(y)
-                # If normalized, fix to [0,1]; else autoscale
                 if normalize:
                     ax.set_rlim(0, 1.0)
-                rlabel = "Magnitude (normalized)" if normalize else "Magnitude"
+                    rlabel = "Magnitude (normalized)"
+                else:
+                    rlabel = "Magnitude"
 
             h, = ax.plot(phi, r, lw=1, ls='-')
             handles.append(h)
-            labels.append(f"{freqs[i_eff] / 1e9:.3f} GHz")
+            labels.append(f"{freqs[j] / 1e9:.3f} GHz")
 
         ax.legend(handles, labels, loc="upper right", bbox_to_anchor=(1.2, 1.10))
         ax.set_rlabel_position(135)
@@ -1719,7 +1740,7 @@ class FDTD_2D_Ez:
         # Title: what we plotted + "(φ)"
         ax.set_title(f"{key} (φ)")
 
-        # y-axis label text (note: polar axes don't have a natural y-label; place as annotation)
+        # radial label via annotation
         ax.annotate(rlabel, xy=(0.98, 0.02), xycoords="axes fraction",
                     ha="right", va="bottom", fontsize=9,
                     bbox=dict(facecolor="white", alpha=0.6, edgecolor="none"))

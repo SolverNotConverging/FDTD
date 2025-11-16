@@ -1624,7 +1624,7 @@ class FDTD_2D_Hz:
         dr_db : float
             Dynamic range floor in dB when db=True (e.g., 40 → floor at −40 dB).
         normalize : {"max","integral",None,False}
-            How to normalize each curve before plotting.
+            How to normalize curves before plotting.
         """
         import numpy as np
         import matplotlib.pyplot as plt
@@ -1655,15 +1655,27 @@ class FDTD_2D_Hz:
         if not idx_clean:
             raise ValueError("No valid freq_idx to plot.")
 
+        # --- compute global normalization factor (for normalize == "max")
+        if normalize == "max":
+            # use only the selected beams
+            sel = data[idx_clean, :]
+            global_max = np.max(np.abs(sel))
+            if global_max <= 0:
+                global_max = None
+        else:
+            global_max = None
+
         # --- normalization helpers
         def _norm_curve(y):
             if not normalize:
                 return y
             if normalize == "max":
-                m = np.max(np.abs(y))
-                return y / m if m > 0 else y
+                # use global max of all selected beams
+                if global_max is None:
+                    return y
+                return y / global_max
             if normalize == "integral":
-                # approximate integral over φ
+                # approximate integral over φ (still per-curve)
                 integ = np.trapz(np.abs(y), phi)
                 return y / integ if integ > 0 else y
             return y
