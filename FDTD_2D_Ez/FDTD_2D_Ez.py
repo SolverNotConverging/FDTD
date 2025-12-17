@@ -1560,11 +1560,11 @@ class FDTD_2D_Ez:
 
         def _phase_x(xline, yconst):
             # rhat·r' = x cosφ + y sinφ
-            return np.exp(-1j * (k0[..., None]) * (xline[None, None, :] * cφ[..., None] +
+            return np.exp(+1j * (k0[..., None]) * (xline[None, None, :] * cφ[..., None] +
                                                    yconst[None, None, :] * sφ[..., None]))
 
         def _phase_y(xconst, yline):
-            return np.exp(-1j * (k0[..., None]) * (xconst[None, None, :] * cφ[..., None] +
+            return np.exp(+1j * (k0[..., None]) * (xconst[None, None, :] * cφ[..., None] +
                                                    yline[None, None, :] * sφ[..., None]))
 
         PH_T = _phase_x(xT, yT)  # top    (Nf,nφ,LT)
