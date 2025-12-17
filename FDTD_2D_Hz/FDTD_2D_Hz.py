@@ -1556,7 +1556,7 @@ class FDTD_2D_Hz:
 
         def _phase_line(xline, yline):
             # rhat·r' = x cosφ + y sinφ
-            return np.exp(-1j * (k0[..., None]) * (
+            return np.exp(+1j * (k0[..., None]) * (
                     xline[None, None, :] * cφ[..., None] +
                     yline[None, None, :] * sφ[..., None]
             ))
