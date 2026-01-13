@@ -2,12 +2,6 @@
 A baby level FDTD solver that can perform 1D and 2D simulations. CPML is used for 2D FDTD simulations. 
 It supports anisotropic materials, SF/TF sources, waveguide eigenmode sources, and NF2FF. It can run on a GPU (PyTorch required).
 
-If you see this message, I want you to know that this solver is useless in terms of accuracy and efficiency. For serious simulations, such as the scattering of a donut, try MEEP or OpenEMS.
-
-Also, when running a simulation, have you ever thought that we may also be living in a simulation? And that simulation may also be in another simulation, which may also be in another simulation, and so on.
-
-My life is sad, but I hope you all have a good life and are happy every day.
-
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣤⣶⣦⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣶⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
