@@ -1,5 +1,5 @@
 # FDTD
-A baby level FDTD solver that can perform 1D and 2D simulations. CPML is used for 2D FDTD simulations. 
+A baby level FDTD solver that can perform 1D and 2D simulations. CPML is used. 
 It supports anisotropic materials, SF/TF sources, waveguide eigenmode sources, and NF2FF. It can run on a GPU (PyTorch required).
 3D version is under development.
 
