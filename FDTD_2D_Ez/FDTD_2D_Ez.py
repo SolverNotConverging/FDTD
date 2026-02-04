@@ -36,8 +36,8 @@ class FDTD_2D_Ez:
         dt_freq_sampling = 1.0 / (20 * self.f_max)
         self.dt = float(dt) if dt is not None else min(dt_cfl, dt_freq_sampling)
 
-        # periodic directions list like ['x','y'] or []
-        self.periodic = []
+        # periodic directions string like '' | 'x' | 'y' | 'xy'
+        self.periodic = ''
 
         # materials
         self.ERzz = np.ones((self.Nx, self.Ny))

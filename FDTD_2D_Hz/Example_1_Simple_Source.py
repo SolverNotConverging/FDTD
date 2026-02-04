@@ -1,7 +1,7 @@
 from FDTD_2D_Hz import FDTD_2D_Hz
 
 sim = FDTD_2D_Hz(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=50e9, f_max=100e9, Nt=1000)
-sim.periodic = ['']
+sim.periodic = ''
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 
 sim.add_rectangle(ER=[5, 6, 7], MR=1, x_position=(5e-3, 6e-3), y_position=(4e-3, 5e-3))

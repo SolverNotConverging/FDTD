@@ -19,7 +19,7 @@ sim = FDTD_2D_Ez_GPU(
 )
 
 # Periodic BC disabled for this example.
-sim.periodic = []
+sim.periodic = ''
 
 sim.add_PML(pml_width=15, order=3, direction='xy', kappa_max=6, alpha_max=0.03)
 
