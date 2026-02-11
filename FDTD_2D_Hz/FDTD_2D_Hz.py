@@ -561,7 +561,7 @@ class FDTD_2D_Hz:
 
     # ---------- public API: add_source ----------
     def add_source(self, kind, x, y, amplitude=1.0, t0=None, tw=None,
-                   f_min=None, f_max=None, mode_index=1,
+                   f_min=None, f_max=None, mode_index=0,
                    modes_to_show=4, eig_guess=None, is_show=True,
                    angle=None):
 
@@ -741,7 +741,7 @@ class FDTD_2D_Hz:
 
                     ax1.set_ylabel('Ex (arb.)')
                     ax2.set_ylabel('Hz (arb.)')
-                    ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
+                    ax1.set_title(f'mode {m}: n_eff = {n_effs[m]:.6f}')
                     ax1.grid(True, alpha=0.25)
 
                     # compact combined legend
@@ -757,8 +757,8 @@ class FDTD_2D_Hz:
                 fig.tight_layout()
                 plt.show()
 
-            # select which mode to inject (1-based)
-            mi = max(1, int(mode_index)) - 1
+            # select which mode to inject (0-based)
+            mi = max(0, int(mode_index))
             mi = min(mi, Hz_modes.shape[0] - 1)
             s['Hz_src'] = Hz_modes[mi]
             s['Ex_src'] = Ex_modes[mi]
@@ -798,7 +798,7 @@ class FDTD_2D_Hz:
 
                     ax1.set_ylabel('Ey (arb.)')
                     ax2.set_ylabel('Hz (arb.)')
-                    ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
+                    ax1.set_title(f'mode {m}: n_eff = {n_effs[m]:.6f}')
                     ax1.grid(True, alpha=0.25)
 
                     lines, labels = [], []
@@ -813,7 +813,7 @@ class FDTD_2D_Hz:
                 fig.tight_layout()
                 plt.show()
 
-            mi = max(1, int(mode_index)) - 1
+            mi = max(0, int(mode_index))
             mi = min(mi, Hz_modes.shape[0] - 1)
             s['Hz_src'] = Hz_modes[mi]
             s['Ey_src'] = Ey_modes[mi]

@@ -555,7 +555,7 @@ class FDTD_2D_Ez:
 
     # ---------- public API: add_source ----------
     def add_source(self, kind, x, y, amplitude=1.0, t0=None, tw=None, f_min=None, f_max=None,
-                   mode_index=1, modes_to_show=4, eig_guess=None, is_show=True, angle=None):
+                   mode_index=0, modes_to_show=4, eig_guess=None, is_show=True, angle=None):
         """
         Add a source.
 
@@ -733,7 +733,7 @@ class FDTD_2D_Ez:
 
                     ax1.set_ylabel('Ez (arb.)')
                     ax2.set_ylabel('Hx (arb.)')
-                    ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
+                    ax1.set_title(f'mode {m}: n_eff = {n_effs[m]:.6f}')
                     ax1.grid(True, alpha=0.25)
 
                     # compact combined legend
@@ -749,8 +749,8 @@ class FDTD_2D_Ez:
                 fig.tight_layout()
                 plt.show()
 
-            # select which mode to inject (1-based)
-            mi = max(1, int(mode_index)) - 1
+            # select which mode to inject (0-based)
+            mi = max(0, int(mode_index))
             mi = min(mi, Ez_modes.shape[0] - 1)
             s['Ez_src'] = Ez_modes[mi]
             s['Hx_src'] = Hx_modes[mi]
@@ -790,7 +790,7 @@ class FDTD_2D_Ez:
 
                     ax1.set_ylabel('Ez (arb.)')
                     ax2.set_ylabel('Hy (arb.)')
-                    ax1.set_title(f'mode {m + 1}: n_eff = {n_effs[m]:.6f}')
+                    ax1.set_title(f'mode {m}: n_eff = {n_effs[m]:.6f}')
                     ax1.grid(True, alpha=0.25)
 
                     lines, labels = [], []
@@ -805,7 +805,7 @@ class FDTD_2D_Ez:
                 fig.tight_layout()
                 plt.show()
 
-            mi = max(1, int(mode_index)) - 1
+            mi = max(0, int(mode_index))
             mi = min(mi, Ez_modes.shape[0] - 1)
             s['Ez_src'] = Ez_modes[mi]
             s['Hy_src'] = Hy_modes[mi]
