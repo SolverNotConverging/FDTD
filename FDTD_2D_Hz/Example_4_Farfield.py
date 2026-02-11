@@ -15,7 +15,7 @@ for i in np.arange(7e-3, 10e-3, 0.1e-3):
 
 sim.add_rectangle(ER=1e8, MR=1, y_position=(3e-3, 11e-3), x_position=(5.9e-3, 6e-3))
 
-sim.add_source('waveguide-x', y=(2e-3, 12e-3), x=6.5e-3, amplitude=2, mode_index=1, modes_to_show=3)
+sim.add_source('waveguide-x', y=(2e-3, 12e-3), x=6.5e-3, amplitude=2, mode_index=0, modes_to_show=3)
 
 sim.add_line_monitor(x=(21, 119), y=119)
 sim.add_line_monitor(x=(21, 119), y=21)
