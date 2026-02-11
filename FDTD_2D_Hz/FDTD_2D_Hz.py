@@ -408,6 +408,111 @@ class FDTD_2D_Hz:
         mag = np.abs(S[pos]) + 1e-30
         return float(np.sum(f * mag) / np.sum(mag))
 
+    def calculate_source_power_fft(self, source_index=0, window='hann', detrend=True):
+        """
+        Calculate the one-sided FFT source spectrum and an aperture-aware power estimate.
+
+        The previous implementation returned power from only the temporal waveform
+        ``g(t)``. Here we additionally scale by a geometry factor so different
+        source kinds (point/line/waveguide/TF-SF) report different injected power
+        levels.
+
+        Parameters
+        ----------
+        source_index : int
+            Index into ``self.sources``.
+        window : str or None
+            Optional time window: ``'hann'``/``'hanning'``, ``'hamming'``,
+            ``'blackman'``, or ``None``.
+        detrend : bool
+            If True, remove the mean before FFT.
+
+        Returns
+        -------
+        dict with keys:
+            'source_index'    : selected source index
+            'source_kind'     : source kind string
+            'freqs'           : one-sided frequencies (Hz)
+            'spectrum'        : one-sided complex waveform spectrum ``G(f)``
+            'waveform_power'  : waveform-only spectrum ``|G(f)|^2``
+            'power'           : geometry-aware source power estimate
+            'geometry_factor' : spatial scaling factor used for ``power``
+            'waveform'        : time-domain source waveform ``g(t)``
+            'time'            : time axis (s)
+        """
+        if len(self.sources) == 0:
+            raise ValueError("No sources available. Add a source before calling calculate_source_power_fft().")
+        if not (0 <= int(source_index) < len(self.sources)):
+            raise IndexError(f"source_index {source_index} out of range for {len(self.sources)} sources.")
+
+        s = self.sources[int(source_index)]
+        t = np.arange(0, self.Nt * self.dt, self.dt)
+        g = np.asarray(self._g(s, t), dtype=float)
+        Nt = g.shape[0]
+        if Nt < 2:
+            raise ValueError("Need at least 2 time samples for FFT power calculation.")
+
+        if detrend:
+            g = g - np.mean(g)
+
+        if window is None:
+            w = np.ones(Nt, dtype=float)
+        else:
+            key = str(window).lower()
+            if key in ('hann', 'hanning'):
+                w = np.hanning(Nt)
+            elif key == 'hamming':
+                w = np.hamming(Nt)
+            elif key == 'blackman':
+                w = np.blackman(Nt)
+            else:
+                raise ValueError("window must be one of: None, 'hann'/'hanning', 'hamming', 'blackman'.")
+
+        spectrum = np.fft.rfft(g * w) / Nt
+        freqs = np.fft.rfftfreq(Nt, d=self.dt)
+        waveform_power = np.abs(spectrum) ** 2
+
+        # Spatial/aperture factor based on source aperture.
+        # For waveguides, use active-power proxy Re{sum(E_t * conj(H_t))}.
+        k = s.get('kind', '')
+        if k == 'point':
+            geometry_factor = 1.0
+        elif k == 'line-soft':
+            if s['ix0'] != s['ix1']:
+                geometry_factor = float(abs(s['ix1'] - s['ix0']))
+            else:
+                geometry_factor = float(abs(s['iy1'] - s['iy0']))
+        elif k == 'waveguide-y':
+            E_t = np.asarray(s.get('Ex_src', np.array([1.0])), dtype=complex)
+            H_t = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
+            n = min(E_t.size, H_t.size)
+            geometry_factor = float(np.real(np.sum(E_t[:n] * np.conj(H_t[:n]))))
+        elif k == 'waveguide-x':
+            E_t = np.asarray(s.get('Ey_src', np.array([1.0])), dtype=complex)
+            H_t = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
+            n = min(E_t.size, H_t.size)
+            geometry_factor = float(np.real(np.sum(E_t[:n] * np.conj(H_t[:n]))))
+        elif k == 'sftf':
+            nx = max(int(s['ix1'] - s['ix0']) + 1, 0)
+            ny = max(int(s['iy1'] - s['iy0']) + 1, 0)
+            geometry_factor = float(2 * nx + 2 * ny)
+        else:
+            geometry_factor = 1.0
+
+        power = waveform_power * geometry_factor
+
+        return {
+            'source_index': int(source_index),
+            'source_kind': k,
+            'freqs': freqs,
+            'spectrum': spectrum,
+            'waveform_power': waveform_power,
+            'power': power,
+            'geometry_factor': geometry_factor,
+            'waveform': g,
+            'time': t,
+        }
+
     def _wg_modes_y(self, ix0, ix1, iy, f_center, num_modes=4, guess=None, amplitude=1.0):
         import numpy as np
         from scipy.sparse import diags as spdiags
