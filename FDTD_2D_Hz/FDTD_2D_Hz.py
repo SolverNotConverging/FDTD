@@ -1569,7 +1569,7 @@ class FDTD_2D_Hz:
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
 
-    def NF2FF(self, top, bottom, left, right, freqs, nphi=361, src_index=None):
+    def NF2FF(self, top=None, bottom=None, left=None, right=None, freqs=None, nphi=361, src_index=None):
         """
         2D NF->FF (TEz / H-mode) using four line monitors (top, bottom, left, right).
         Each monitor index must refer to a line fully in free space (er=mr=1).
@@ -1578,12 +1578,13 @@ class FDTD_2D_Hz:
 
         Args
         ----
-        top, bottom, left, right : int
-            Indices into self.monitor_results for the four sides of the box.
+        top, bottom, left, right : int or None
+            Indices into self.monitor_results for the sides of the box.
             'top'   : y = y_high (horizontal, x from x1->x2)
             'bottom': y = y_low  (horizontal, x from x1->x2)
             'left'  : x = x_low  (vertical,   y from y1->y2)
             'right' : x = x_high (vertical,   y from y1->y2)
+            At least one side must be provided.
         freqs : 1D array_like
             Frequencies (Hz) at which to compute the FF pattern (θ fixed to 90°, sweep φ).
         nphi : int
@@ -1615,72 +1616,62 @@ class FDTD_2D_Hz:
             K = np.exp(-1j * 2 * np.pi * freqs[:, None] * t[None, :]) * dt  # (Nf,T)
             return K @ series  # (Nf,L)
 
+        if freqs is None:
+            raise ValueError("freqs must be provided.")
+
+        side_indices = {"top": top, "bottom": bottom, "left": left, "right": right}
+        if not any(v is not None for v in side_indices.values()):
+            raise ValueError("At least one of top/bottom/left/right must be provided.")
+
         # --- get monitors
         M = self.monitor_results
-        mT = M[int(top)]
-        mB = M[int(bottom)]
-        mL = M[int(left)]
-        mR = M[int(right)]
-
-        # Expect orientations consistent with labels
-        if not (mT["orientation"] == "horizontal" and
-                mB["orientation"] == "horizontal" and
-                mL["orientation"] == "vertical" and
-                mR["orientation"] == "vertical"):
-            raise ValueError("Monitor orientations (top/bottom/left/right) are not as expected.")
-
-        # --- geometry / coordinates for phase factors
-        # For TEz the contour samples sit at Yee cell centers (half-grid offsets in x,y)
-        # because Hz lives at (i+½, j+½) and Ex/Ey have been interpolated to that same
-        # location prior to saving monitor data.  All coordinates therefore include the
-        # +0.5 shift from the integer index.
-        # Top & bottom (horizontal)
-        xT = (np.arange(mT["ix0"], mT["ix1"]) + 0.5) * self.dx
-        yT = np.full_like(xT, (mT["iy0"] + 0.5) * self.dy, dtype=float)
-        xB = (np.arange(mB["ix0"], mB["ix1"]) + 0.5) * self.dx
-        yB = np.full_like(xB, (mB["iy0"] + 0.5) * self.dy, dtype=float)
-        # Right & left (vertical)
-        yR = (np.arange(mR["iy0"], mR["iy1"]) + 0.5) * self.dy
-        xR = np.full_like(yR, (mR["ix0"] + 0.5) * self.dx, dtype=float)
-        yL = (np.arange(mL["iy0"], mL["iy1"]) + 0.5) * self.dy
-        xL = np.full_like(yL, (mL["ix0"] + 0.5) * self.dx, dtype=float)
+        need_orientation = {"top": "horizontal", "bottom": "horizontal", "left": "vertical", "right": "vertical"}
+        side_monitors = {}
+        for side, idx in side_indices.items():
+            if idx is None:
+                side_monitors[side] = None
+                continue
+            m = M[int(idx)]
+            ori = m.get("orientation", "").lower()
+            if ori != need_orientation[side]:
+                raise ValueError(f"Monitor {idx} must be {need_orientation[side]}, got '{ori}'.")
+            side_monitors[side] = m
 
         # Differential lengths for integration
         dx = self.dx
         dy = self.dy
 
-        # --- build time grids per monitor
-        tT = np.arange(mT["it0"], mT["it1"]) * self.dt
-        tB = np.arange(mB["it0"], mB["it1"]) * self.dt
-        tL = np.arange(mL["it0"], mL["it1"]) * self.dt
-        tR = np.arange(mR["it0"], mR["it1"]) * self.dt
-
-        # --- get time series arrays (T,L) for each side
-        # In TEz, monitors store Hz, Ex, Ey along the line
-        HzT, ExT, EyT = mT["Hz"], mT["Ex"], mT["Ey"]
-        HzB, ExB, EyB = mB["Hz"], mB["Ex"], mB["Ey"]
-        HzL, ExL, EyL = mL["Hz"], mL["Ex"], mL["Ey"]
-        HzR, ExR, EyR = mR["Hz"], mR["Ex"], mR["Ey"]
-
         # --- phasors at requested freqs: (Nf, L)
         freqs = np.asarray(freqs, float)
 
-        # Out-of-plane magnetic field Hz (scaled by η0, like Ez in TM code)
-        HzT_f = _phasor_time_series(HzT, tT, freqs)
-        HzB_f = _phasor_time_series(HzB, tB, freqs)
-        HzL_f = _phasor_time_series(HzL, tL, freqs)
-        HzR_f = _phasor_time_series(HzR, tR, freqs)
+        side_data = {}
+        for side, m in side_monitors.items():
+            if m is None:
+                side_data[side] = None
+                continue
 
-        # In-plane electric fields (tangential components on each side)
-        ExT_f = _phasor_time_series(ExT, tT, freqs) * self.eta0
-        ExB_f = _phasor_time_series(ExB, tB, freqs) * self.eta0
-        ExL_f = _phasor_time_series(ExL, tL, freqs) * self.eta0
-        ExR_f = _phasor_time_series(ExR, tR, freqs) * self.eta0
+            t_side = np.arange(m["it0"], m["it1"]) * self.dt
+            hz_side = _phasor_time_series(m["Hz"], t_side, freqs)
+            ex_side = _phasor_time_series(m["Ex"], t_side, freqs) * self.eta0
+            ey_side = _phasor_time_series(m["Ey"], t_side, freqs) * self.eta0
 
-        EyT_f = _phasor_time_series(EyT, tT, freqs) * self.eta0
-        EyB_f = _phasor_time_series(EyB, tB, freqs) * self.eta0
-        EyL_f = _phasor_time_series(EyL, tL, freqs) * self.eta0
-        EyR_f = _phasor_time_series(EyR, tR, freqs) * self.eta0
+            if side in ("top", "bottom"):
+                x_side = (np.arange(m["ix0"], m["ix1"]) + 0.5) * self.dx
+                y_side = np.full_like(x_side, (m["iy0"] + 0.5) * self.dy, dtype=float)
+                dl = dx
+            else:
+                y_side = (np.arange(m["iy0"], m["iy1"]) + 0.5) * self.dy
+                x_side = np.full_like(y_side, (m["ix0"] + 0.5) * self.dx, dtype=float)
+                dl = dy
+
+            side_data[side] = {
+                "x": x_side,
+                "y": y_side,
+                "Hz": hz_side,
+                "Ex": ex_side,
+                "Ey": ey_side,
+                "dl": dl,
+            }
 
         # --- angular grid
         phi = np.linspace(0.0, 2 * np.pi, int(nphi), endpoint=False)  # (nphi,)
@@ -1697,28 +1688,27 @@ class FDTD_2D_Hz:
                     yline[None, None, :] * sφ[..., None]
             ))
 
-        PH_T = _phase_line(xT, yT)  # top
-        PH_B = _phase_line(xB, yB)  # bottom
-        PH_R = _phase_line(xR, yR)  # right
-        PH_L = _phase_line(xL, yL)  # left
+        phase_data = {}
+        for side, sd in side_data.items():
+            phase_data[side] = None if sd is None else _phase_line(sd["x"], sd["y"])
 
-        # --- integral helpers along x or y
-        def _int_x(Fx, PH):  # integrate along x with dx
-            return np.sum(Fx[:, None, :] * PH, axis=2) * dx  # (Nf,nφ)
-
-        def _int_y(Fy, PH):  # integrate along y with dy
-            return np.sum(Fy[:, None, :] * PH, axis=2) * dy
+        def _int_side(side, field_key):
+            sd = side_data[side]
+            ph = phase_data[side]
+            if sd is None or ph is None:
+                return np.zeros((freqs.size, phi.size), dtype=complex)
+            return np.sum(sd[field_key][:, None, :] * ph, axis=2) * sd["dl"]
 
         # TEz version (dual of TMz):
-        Nφ = (+ sφ * _int_x(HzB_f, PH_B)
-              - cφ * _int_y(HzR_f, PH_R)
-              - sφ * _int_x(HzT_f, PH_T)
-              + cφ * _int_y(HzL_f, PH_L))  # (Nf,nφ)
+        Nφ = (+ sφ * _int_side("bottom", "Hz")
+              - cφ * _int_side("right", "Hz")
+              - sφ * _int_side("top", "Hz")
+              + cφ * _int_side("left", "Hz"))  # (Nf,nφ)
 
-        Lθ = (+ _int_x(ExB_f, PH_B)
-              + _int_y(EyR_f, PH_R)
-              - _int_x(ExT_f, PH_T)
-              - _int_y(EyL_f, PH_L))  # (Nf,nφ)
+        Lθ = (+ _int_side("bottom", "Ex")
+              + _int_side("right", "Ey")
+              - _int_side("top", "Ex")
+              - _int_side("left", "Ey"))  # (Nf,nφ)
 
         # --- Far fields (θ=90°) for TEz BEFORE normalization:
         #   Hθ = η Nθ + Lφ

@@ -1570,7 +1570,7 @@ class FDTD_2D_Ez:
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
 
-    def NF2FF(self, top, bottom, left, right, freqs, nphi=361, src_index=None):
+    def NF2FF(self, top=None, bottom=None, left=None, right=None, freqs=None, nphi=361, src_index=None):
         """
         2D NF->FF (TMz / E-mode) using four line monitors (top, bottom, left, right).
         Each monitor index must refer to a line fully in free space (er=mr=1).
@@ -1579,12 +1579,13 @@ class FDTD_2D_Ez:
 
         Args
         ----
-        top, bottom, left, right : int
-            Indices into self.monitor_results for the four sides of the box.
+        top, bottom, left, right : int or None
+            Indices into self.monitor_results for the sides of the box.
             'top'  : y = y_high (horizontal, x from x1->x2)
             'bottom': y = y_low  (horizontal, x from x1->x2)
             'left' : x = x_low   (vertical,   y from y1->y2)
             'right': x = x_high  (vertical,   y from y1->y2)
+            At least one side must be provided.
         freqs : 1D array_like
             Frequencies (Hz) at which to compute the FF pattern (θ fixed to 90°, sweep φ).
         nphi : int
@@ -1621,70 +1622,62 @@ class FDTD_2D_Ez:
             # (T, L) → (Nf, L)
             return K @ series
 
+        if freqs is None:
+            raise ValueError("freqs must be provided.")
+
+        side_indices = {"top": top, "bottom": bottom, "left": left, "right": right}
+        if not any(v is not None for v in side_indices.values()):
+            raise ValueError("At least one of top/bottom/left/right must be provided.")
+
         # --- get monitors
         M = self.monitor_results
-        mT = M[int(top)]
-        mB = M[int(bottom)]
-        mL = M[int(left)]
-        mR = M[int(right)]
-
-        # --- sanity: orientations
-        for midx, m, need in [(top, mT, "horizontal"),
-                              (bottom, mB, "horizontal"),
-                              (left, mL, "vertical"),
-                              (right, mR, "vertical")]:
+        need_orientation = {"top": "horizontal", "bottom": "horizontal", "left": "vertical", "right": "vertical"}
+        side_monitors = {}
+        for side, idx in side_indices.items():
+            if idx is None:
+                side_monitors[side] = None
+                continue
+            m = M[int(idx)]
             ori = m.get("orientation", "").lower()
-            if ori != need:
-                raise ValueError(f"Monitor {midx} must be {need}, got '{ori}'.")
-
-        # --- geometry / coordinates for phase factors
-        # For TMz we interpret the NF contour as lying on the Yee cell edges, i.e.
-        # integer multiples of dx/dy. The monitored fields have already been
-        # interpolated so that Ez, Hx, Hy coincide in space/time, but the contour
-        # geometry is still referenced to the underlying edge locations.
-        # Top & bottom (horizontal)
-        xT = np.arange(mT["ix0"], mT["ix1"], dtype=float) * self.dx
-        yT = np.full_like(xT, mT["iy0"] * self.dy, dtype=float)
-        xB = np.arange(mB["ix0"], mB["ix1"], dtype=float) * self.dx
-        yB = np.full_like(xB, mB["iy0"] * self.dy, dtype=float)
-        # Right & left (vertical)
-        yR = np.arange(mR["iy0"], mR["iy1"], dtype=float) * self.dy
-        xR = np.full_like(yR, mR["ix0"] * self.dx, dtype=float)
-        yL = np.arange(mL["iy0"], mL["iy1"], dtype=float) * self.dy
-        xL = np.full_like(yL, mL["ix0"] * self.dx, dtype=float)
+            if ori != need_orientation[side]:
+                raise ValueError(f"Monitor {idx} must be {need_orientation[side]}, got '{ori}'.")
+            side_monitors[side] = m
 
         # Differential lengths for integration
         dx = self.dx
         dy = self.dy
 
-        # --- build time grids per monitors
-        tT = np.arange(mT["it0"], mT["it1"]) * self.dt
-        tB = np.arange(mB["it0"], mB["it1"]) * self.dt
-        tL = np.arange(mL["it0"], mL["it1"]) * self.dt
-        tR = np.arange(mR["it0"], mR["it1"]) * self.dt
-
-        # --- get time series arrays (T,L) for each side
-        EzT, HxT, HyT = mT["Ez"], mT["Hx"], mT["Hy"]
-        EzB, HxB, HyB = mB["Ez"], mB["Hx"], mB["Hy"]
-        EzL, HxL, HyL = mL["Ez"], mL["Hx"], mL["Hy"]
-        EzR, HxR, HyR = mR["Ez"], mR["Hx"], mR["Hy"]
-
-        # --- phasors at requested freqs: (Nf, L)
         freqs = np.asarray(freqs, float)
-        ET = _phasor_time_series(EzT, tT, freqs) * self.eta0
-        EB = _phasor_time_series(EzB, tB, freqs) * self.eta0
-        EL = _phasor_time_series(EzL, tL, freqs) * self.eta0
-        ER = _phasor_time_series(EzR, tR, freqs) * self.eta0
 
-        HxT_f = _phasor_time_series(HxT, tT, freqs)
-        HxB_f = _phasor_time_series(HxB, tB, freqs)
-        HxL_f = _phasor_time_series(HxL, tL, freqs)
-        HxR_f = _phasor_time_series(HxR, tR, freqs)
+        # --- prep per-side data
+        side_data = {}
+        for side, m in side_monitors.items():
+            if m is None:
+                side_data[side] = None
+                continue
 
-        HyT_f = _phasor_time_series(HyT, tT, freqs)
-        HyB_f = _phasor_time_series(HyB, tB, freqs)
-        HyL_f = _phasor_time_series(HyL, tL, freqs)
-        HyR_f = _phasor_time_series(HyR, tR, freqs)
+            t_side = np.arange(m["it0"], m["it1"]) * self.dt
+            e_side = _phasor_time_series(m["Ez"], t_side, freqs) * self.eta0
+            hx_side = _phasor_time_series(m["Hx"], t_side, freqs)
+            hy_side = _phasor_time_series(m["Hy"], t_side, freqs)
+
+            if side in ("top", "bottom"):
+                x_side = np.arange(m["ix0"], m["ix1"], dtype=float) * self.dx
+                y_side = np.full_like(x_side, m["iy0"] * self.dy, dtype=float)
+                dl = dx
+            else:
+                y_side = np.arange(m["iy0"], m["iy1"], dtype=float) * self.dy
+                x_side = np.full_like(y_side, m["ix0"] * self.dx, dtype=float)
+                dl = dy
+
+            side_data[side] = {
+                "x": x_side,
+                "y": y_side,
+                "Ez": e_side,
+                "Hx": hx_side,
+                "Hy": hy_side,
+                "dl": dl,
+            }
 
         # --- φ grid (θ = 90° plane); r-hat = (cosφ, sinφ)
         phi = np.linspace(0.0, 2 * np.pi, int(nphi), endpoint=False)
@@ -1694,19 +1687,23 @@ class FDTD_2D_Ez:
         # --- phase factors e^{-jk rhat·r'} for each side (Nf,nφ,L)
         k0 = 2 * np.pi * freqs[:, None] / self.c0  # (Nf,1)
 
-        def _phase_x(xline, yconst):
-            # rhat·r' = x cosφ + y sinφ
+        def _phase_xy(xline, yline):
             return np.exp(+1j * (k0[..., None]) * (xline[None, None, :] * cφ[..., None] +
-                                                   yconst[None, None, :] * sφ[..., None]))
-
-        def _phase_y(xconst, yline):
-            return np.exp(+1j * (k0[..., None]) * (xconst[None, None, :] * cφ[..., None] +
                                                    yline[None, None, :] * sφ[..., None]))
+        
+        # local adapter to keep math readable
+        def _phase_for(side):
+            sd = side_data[side]
+            if sd is None:
+                return None
+            xconst = sd["x"]
+            yline = sd["y"]
+            return _phase_xy(xconst, yline)
 
-        PH_T = _phase_x(xT, yT)  # top    (Nf,nφ,LT)
-        PH_B = _phase_x(xB, yB)  # bottom (Nf,nφ,LB)
-        PH_R = _phase_y(xR, yR)  # right  (Nf,nφ,LR)
-        PH_L = _phase_y(xL, yL)  # left   (Nf,nφ,LL)
+        PH_T = _phase_for("top")
+        PH_B = _phase_for("bottom")
+        PH_R = _phase_for("right")
+        PH_L = _phase_for("left")
 
         # Nθ(φ) =  - ∫ Hx_bottom e^{-jk·r'} dx - ∫ Hy_right e^{-jk·r'} dy
         #           + ∫ Hx_top    e^{-jk·r'} dx + ∫ Hy_left  e^{-jk·r'} dy
@@ -1717,21 +1714,22 @@ class FDTD_2D_Ez:
         # Shapes:
         #   Hx*_f : (Nf, Lx),  PH_* : (Nf, nφ, Lx)
 
-        def _int_x(Fx, PH):  # integrate along x with dx
-            return np.sum(Fx[:, None, :] * PH, axis=2) * dx  # (Nf,nφ)
+        def _int_side(side, field_key):
+            sd = side_data[side]
+            ph = {"top": PH_T, "bottom": PH_B, "left": PH_L, "right": PH_R}[side]
+            if sd is None or ph is None:
+                return np.zeros((freqs.size, phi.size), dtype=complex)
+            return np.sum(sd[field_key][:, None, :] * ph, axis=2) * sd["dl"]
 
-        def _int_y(Fy, PH):  # integrate along y with dy
-            return np.sum(Fy[:, None, :] * PH, axis=2) * dy
+        Nθ = (- _int_side("bottom", "Hx")
+              - _int_side("right", "Hy")
+              + _int_side("top", "Hx")
+              + _int_side("left", "Hy"))  # (Nf,nφ)
 
-        Nθ = (- _int_x(HxB_f, PH_B)
-              - _int_y(HyR_f, PH_R)
-              + _int_x(HxT_f, PH_T)
-              + _int_y(HyL_f, PH_L))  # (Nf,nφ)
-
-        Lφ = (- sφ * _int_x(EB, PH_B)
-              + cφ * _int_y(ER, PH_R)
-              + sφ * _int_x(ET, PH_T)
-              - cφ * _int_y(EL, PH_L))  # (Nf,nφ)
+        Lφ = (- sφ * _int_side("bottom", "Ez")
+              + cφ * _int_side("right", "Ez")
+              + sφ * _int_side("top", "Ez")
+              - cφ * _int_side("left", "Ez"))  # (Nf,nφ)
 
         # --- Far fields (θ=90°). From slide:
         # Eθ = j k e^{jk r} / (4π r) ( η Nθ + Lφ )
