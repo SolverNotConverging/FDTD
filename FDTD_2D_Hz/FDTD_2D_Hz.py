@@ -906,6 +906,142 @@ class FDTD_2D_Hz:
         """Convenience wrapper for averaging with the neighbour at index +1."""
         return self._avg_with_neighbor(arr, axis, periodic, direction=+1)
 
+    def calculate_line_monitor_power_fft(self, monitor_index, window='hann', detrend=True, normal_sign=1.0):
+        """
+        Calculate frequency-domain power flow through one line monitor using FFT.
+
+        The monitor must come from ``run(...)`` and therefore contain collocated
+        time samples for ``Hz``, ``Ex`` and ``Ey``.
+
+        Args
+        ----
+        monitor_index : int
+            Index into ``self.monitor_results``.
+        window : str or None
+            Time-domain window applied before FFT. Supported: ``'hann'``,
+            ``'hamming'``, ``'blackman'``. Use ``None`` for rectangular window.
+        detrend : bool
+            If True, remove per-point DC value before FFT.
+        normal_sign : float
+            Sign of monitor normal direction (+1 or -1).
+
+        Returns
+        -------
+        dict with keys:
+            'freqs'          : positive frequency bins (Hz)
+            'power'          : signed real power through the line (W, per FFT bin)
+            'complex_power'  : complex line power spectrum
+            'power_density'  : complex power density along the line (Nf, Nline)
+            'orientation'    : monitor orientation
+            'normal_sign'    : copied input
+            'monitor_index'  : copied input
+        """
+        if not self.monitor_results:
+            raise RuntimeError("No monitor data found. Run simulation first.")
+
+        m = self.monitor_results[int(monitor_index)]
+        ori = m.get("orientation", "").lower()
+        if ori not in ("horizontal", "vertical"):
+            raise ValueError(f"Unsupported monitor orientation: '{ori}'.")
+
+        Hz = np.asarray(m["Hz"], dtype=float)
+        Ex = np.asarray(m["Ex"], dtype=float)
+        Ey = np.asarray(m["Ey"], dtype=float)
+
+        if Hz.ndim != 2 or Ex.shape != Hz.shape or Ey.shape != Hz.shape:
+            raise ValueError("Monitor arrays must have shape (Nt_monitor, Nline).")
+
+        Nt = Hz.shape[0]
+        if Nt < 2:
+            raise ValueError("Need at least 2 time samples for FFT power calculation.")
+
+        if window is None:
+            w = np.ones(Nt, dtype=float)
+        else:
+            ws = str(window).lower()
+            if ws in ('hann', 'hanning'):
+                w = np.hanning(Nt)
+            elif ws == 'hamming':
+                w = np.hamming(Nt)
+            elif ws == 'blackman':
+                w = np.blackman(Nt)
+            else:
+                raise ValueError("window must be one of: None, 'hann', 'hamming', 'blackman'.")
+
+        if detrend:
+            Hz = Hz - np.mean(Hz, axis=0, keepdims=True)
+            Ex = Ex - np.mean(Ex, axis=0, keepdims=True)
+            Ey = Ey - np.mean(Ey, axis=0, keepdims=True)
+
+        Hz_f = np.fft.rfft(Hz * w[:, None], axis=0) / Nt
+        Ex_f = np.fft.rfft(Ex * w[:, None], axis=0) / Nt
+        Ey_f = np.fft.rfft(Ey * w[:, None], axis=0) / Nt
+        freqs = np.fft.rfftfreq(Nt, d=self.dt)
+
+        if ori == 'horizontal':
+            # Sy = -Ex * Hz / eta0
+            power_density = normal_sign * (-0.5 / self.eta0) * Ex_f * np.conj(Hz_f)
+            dL = self.dx
+        else:
+            # Sx = Ey * Hz / eta0
+            power_density = normal_sign * (0.5 / self.eta0) * Ey_f * np.conj(Hz_f)
+            dL = self.dy
+
+        complex_power = np.sum(power_density, axis=1) * dL
+        power = np.real(complex_power)
+
+        return {
+            "freqs": freqs,
+            "power": power,
+            "complex_power": complex_power,
+            "power_density": power_density,
+            "orientation": ori,
+            "normal_sign": float(normal_sign),
+            "monitor_index": int(monitor_index),
+        }
+
+    def plot_line_monitor_power_fft(self, power_result, db=False, ref_power=None, f_range=None, ax=None):
+        """Plot FFT line-monitor power returned by ``calculate_line_monitor_power_fft``."""
+        import matplotlib.pyplot as plt
+
+        f = np.asarray(power_result["freqs"], dtype=float)
+        p = np.asarray(power_result["power"], dtype=float)
+
+        mask = np.ones_like(f, dtype=bool)
+        if f_range is not None:
+            f0, f1 = float(f_range[0]), float(f_range[1])
+            if f1 < f0:
+                f0, f1 = f1, f0
+            mask &= (f >= f0) & (f <= f1)
+
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(7, 4))
+        else:
+            fig = ax.figure
+
+        ff = f[mask]
+        pp = p[mask]
+
+        if db:
+            eps = 1e-30
+            if ref_power is None:
+                ref = max(np.max(np.abs(pp)), eps)
+            else:
+                ref = max(float(ref_power), eps)
+            yy = 10.0 * np.log10(np.maximum(np.abs(pp), eps) / ref)
+            ylabel = 'Line power (dB)'
+        else:
+            yy = pp
+            ylabel = 'Line power (W, signed)'
+
+        ax.plot(ff, yy, lw=1.5)
+        ax.set_xlabel('Frequency (Hz)')
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.set_title(f"FFT power spectrum (monitor {power_result.get('monitor_index', '?')}, {power_result.get('orientation', '?')})")
+        fig.tight_layout()
+        return fig, ax
+
     # ---------- spatial curls ----------
     def calculate_Curl_E(self):
         # identical to your implementations (periodic variants)
