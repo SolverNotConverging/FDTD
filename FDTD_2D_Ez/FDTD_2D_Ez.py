@@ -472,21 +472,43 @@ class FDTD_2D_Ez:
         freqs = np.fft.rfftfreq(Nt, d=self.dt)
         waveform_power = np.abs(spectrum) ** 2
 
-        # Spatial/aperture factor: proportional to integrated |source profile|^2.
+        # Spatial/aperture factor.
+        #
+        # For soft sources we weight each excited cell by local material
+        # properties (requested): eps_r * sqrt(eps_r * mu_r), where mu_r is
+        # represented by the geometric mean of in-plane permeability.
+        #
+        # For waveguide sources we use the summed real modal Poynting product
+        # Re(Et * conj(Ht)).
         k = s.get('kind', '')
+
+        def _mu_eff(ix, iy):
+            return float(np.sqrt(self.MRxx[ix, iy] * self.MRyy[ix, iy]))
+
+        def _cell_factor(ix, iy):
+            eps_r = float(self.ERzz[ix, iy])
+            mu_r = _mu_eff(ix, iy)
+            return eps_r * np.sqrt(eps_r * mu_r)
+
         if k == 'point':
-            geometry_factor = 1.0
+            geometry_factor = _cell_factor(int(s['ix0']), int(s['iy0']))
         elif k == 'line-soft':
             if s['ix0'] != s['ix1']:
-                geometry_factor = float(abs(s['ix1'] - s['ix0']))
+                y = int(s['iy0'])
+                i0, i1 = int(min(s['ix0'], s['ix1'])), int(max(s['ix0'], s['ix1']))
+                geometry_factor = float(np.sum([_cell_factor(i, y) for i in range(i0, i1)]))
             else:
-                geometry_factor = float(abs(s['iy1'] - s['iy0']))
+                x = int(s['ix0'])
+                j0, j1 = int(min(s['iy0'], s['iy1'])), int(max(s['iy0'], s['iy1']))
+                geometry_factor = float(np.sum([_cell_factor(x, j) for j in range(j0, j1)]))
         elif k == 'waveguide-y':
-            profile = np.asarray(s.get('Ez_src', np.array([1.0])), dtype=float)
-            geometry_factor = float(np.sum(profile ** 2))
+            Et = np.asarray(s.get('Ez_src', np.array([1.0])), dtype=complex)
+            Ht = np.asarray(s.get('Hx_src', np.array([1.0])), dtype=complex)
+            geometry_factor = float(np.sum(np.real(Et * np.conj(Ht))))
         elif k == 'waveguide-x':
-            profile = np.asarray(s.get('Ez_src', np.array([1.0])), dtype=float)
-            geometry_factor = float(np.sum(profile ** 2))
+            Et = np.asarray(s.get('Ez_src', np.array([1.0])), dtype=complex)
+            Ht = np.asarray(s.get('Hy_src', np.array([1.0])), dtype=complex)
+            geometry_factor = float(np.sum(np.real(Et * np.conj(Ht))))
         elif k == 'sftf':
             nx = max(int(s['ix1'] - s['ix0']) + 1, 0)
             ny = max(int(s['iy1'] - s['iy0']) + 1, 0)
