@@ -1034,11 +1034,16 @@ class FDTD_2D_Hz:
             yy = pp
             ylabel = 'Line power (W, signed)'
 
-        ax.plot(ff, yy, lw=1.5)
-        ax.set_xlabel('Frequency (Hz)')
+        ax.plot(ff / 1e9, yy, lw=1.5)
+        if self.f_min is not None:
+            ax.set_xlim(self.f_min / 1e9, self.f_max / 1e9)
+        else:
+            ax.set_xlim(0, self.f_max / 1e9)
+        ax.set_xlabel('Frequency (GHz)')
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
-        ax.set_title(f"FFT power spectrum (monitor {power_result.get('monitor_index', '?')}, {power_result.get('orientation', '?')})")
+        ax.set_title(
+            f"FFT power spectrum (monitor {power_result.get('monitor_index', '?')}, {power_result.get('orientation', '?')})")
         fig.tight_layout()
         return fig, ax
 
