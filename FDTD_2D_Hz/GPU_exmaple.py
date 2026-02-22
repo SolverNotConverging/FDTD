@@ -1,11 +1,6 @@
 """Minimal example showing how to run :class:`FDTD_2D_Hz_GPU` on a GPU."""
 
-import torch
-
 from FDTD_2D_Hz_GPU import FDTD_2D_Hz_GPU
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Running 2D Hz GPU solver on {device}…")
 
 sim = FDTD_2D_Hz_GPU(
     x_range=12e-3,
@@ -15,8 +10,8 @@ sim = FDTD_2D_Hz_GPU(
     f_min=50e9,
     f_max=90e9,
     Nt=2000,
-    device=device,
 )
+print(f"Running 2D Hz GPU solver on {sim.device}…")
 
 # Periodic BC disabled for this example.
 sim.periodic = ''

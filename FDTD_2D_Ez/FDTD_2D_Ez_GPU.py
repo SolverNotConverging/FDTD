@@ -24,7 +24,12 @@ class FDTD_2D_Ez_GPU(FDTD_2D_Ez):
     # Helpers
     def set_device(self, device: str | torch.device | None):
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
         self.device = torch.device(device)
 
     def _to_tensor(self, array: np.ndarray) -> torch.Tensor:

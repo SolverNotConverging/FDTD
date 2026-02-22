@@ -32,8 +32,8 @@ class FDTD_2D_Hz_GPU(FDTD_2D_Hz):
     additions:
 
     ``device``
-        Torch device string.  ``None`` selects ``"cuda"`` when a GPU is
-        available and falls back to ``"cpu"`` otherwise.
+        Torch device string. ``None`` auto-selects ``"cuda"``, then
+        ``"mps"``, and falls back to ``"cpu"``.
 
     ``dtype``
         Torch floating point dtype.  Defaults to ``torch.float32`` which
@@ -53,7 +53,12 @@ class FDTD_2D_Hz_GPU(FDTD_2D_Hz):
         """Update the torch device used by the solver."""
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
         self.device = torch.device(device)
 
     # The NumPy solver stores most arrays as ``float64``.  Copy them to
