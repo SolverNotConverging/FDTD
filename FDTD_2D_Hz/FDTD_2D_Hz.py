@@ -408,128 +408,6 @@ class FDTD_2D_Hz:
         mag = np.abs(S[pos]) + 1e-30
         return float(np.sum(f * mag) / np.sum(mag))
 
-    def calculate_source_power_fft(self, source_index=0, window='hann', detrend=True):
-        """
-        Calculate the one-sided FFT source spectrum and an aperture-aware power estimate.
-
-        The previous implementation returned power from only the temporal waveform
-        ``g(t)``. Here we additionally scale by a geometry factor so different
-        source kinds (point/line/waveguide/TF-SF) report different injected power
-        levels.
-
-        Parameters
-        ----------
-        source_index : int
-            Index into ``self.sources``.
-        window : str or None
-            Optional time window: ``'hann'``/``'hanning'``, ``'hamming'``,
-            ``'blackman'``, or ``None``.
-        detrend : bool
-            If True, remove the mean before FFT.
-
-        Returns
-        -------
-        dict with keys:
-            'source_index'    : selected source index
-            'source_kind'     : source kind string
-            'freqs'           : one-sided frequencies (Hz)
-            'spectrum'        : one-sided complex waveform spectrum ``G(f)``
-            'waveform_power'  : waveform-only spectrum ``|G(f)|^2``
-            'power'           : geometry-aware source power estimate
-            'geometry_factor' : spatial scaling factor used for ``power``
-            'waveform'        : time-domain source waveform ``g(t)``
-            'time'            : time axis (s)
-        """
-        if len(self.sources) == 0:
-            raise ValueError("No sources available. Add a source before calling calculate_source_power_fft().")
-        if not (0 <= int(source_index) < len(self.sources)):
-            raise IndexError(f"source_index {source_index} out of range for {len(self.sources)} sources.")
-
-        s = self.sources[int(source_index)]
-        t = np.arange(0, self.Nt * self.dt, self.dt)
-        g = np.asarray(self._g(s, t), dtype=float)
-        Nt = g.shape[0]
-        if Nt < 2:
-            raise ValueError("Need at least 2 time samples for FFT power calculation.")
-
-        if detrend:
-            g = g - np.mean(g)
-
-        if window is None:
-            w = np.ones(Nt, dtype=float)
-        else:
-            key = str(window).lower()
-            if key in ('hann', 'hanning'):
-                w = np.hanning(Nt)
-            elif key == 'hamming':
-                w = np.hamming(Nt)
-            elif key == 'blackman':
-                w = np.blackman(Nt)
-            else:
-                raise ValueError("window must be one of: None, 'hann'/'hanning', 'hamming', 'blackman'.")
-
-        spectrum = np.fft.rfft(g * w) / Nt
-        freqs = np.fft.rfftfreq(Nt, d=self.dt)
-        waveform_power = np.abs(spectrum) ** 2
-
-        # Spatial/aperture factor.
-        #
-        # For soft sources we weight each excited cell by local material
-        # properties (requested): mu_r * sqrt(mu_r * eps_r), where eps_r is
-        # represented by the geometric mean of in-plane permittivity.
-        #
-        # For waveguide sources we use the summed real modal Poynting product
-        # Re(Et * conj(Ht)).
-        k = s.get('kind', '')
-
-        def _eps_eff(ix, iy):
-            return float(np.sqrt(self.ERxx[ix, iy] * self.ERyy[ix, iy]))
-
-        def _cell_factor(ix, iy):
-            mu_r = float(self.MRzz[ix, iy])
-            eps_r = _eps_eff(ix, iy)
-            return mu_r * np.sqrt(mu_r * eps_r)
-
-        if k == 'point':
-            geometry_factor = _cell_factor(int(s['ix0']), int(s['iy0']))
-        elif k == 'line-soft':
-            if s['ix0'] != s['ix1']:
-                y = int(s['iy0'])
-                i0, i1 = int(min(s['ix0'], s['ix1'])), int(max(s['ix0'], s['ix1']))
-                geometry_factor = float(np.sum([_cell_factor(i, y) for i in range(i0, i1)]))
-            else:
-                x = int(s['ix0'])
-                j0, j1 = int(min(s['iy0'], s['iy1'])), int(max(s['iy0'], s['iy1']))
-                geometry_factor = float(np.sum([_cell_factor(x, j) for j in range(j0, j1)]))
-        elif k == 'waveguide-y':
-            Et = np.asarray(s.get('Ex_src', np.array([1.0])), dtype=complex)
-            Ht = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
-            geometry_factor = float(np.sum(np.real(Et * np.conj(Ht))))
-        elif k == 'waveguide-x':
-            Et = np.asarray(s.get('Ey_src', np.array([1.0])), dtype=complex)
-            Ht = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
-            geometry_factor = float(np.sum(np.real(Et * np.conj(Ht))))
-        elif k == 'sftf':
-            nx = max(int(s['ix1'] - s['ix0']) + 1, 0)
-            ny = max(int(s['iy1'] - s['iy0']) + 1, 0)
-            geometry_factor = float(2 * nx + 2 * ny)
-        else:
-            geometry_factor = 1.0
-
-        power = waveform_power * geometry_factor
-
-        return {
-            'source_index': int(source_index),
-            'source_kind': k,
-            'freqs': freqs,
-            'spectrum': spectrum,
-            'waveform_power': waveform_power,
-            'power': power,
-            'geometry_factor': geometry_factor,
-            'waveform': g,
-            'time': t,
-        }
-
     def _wg_modes_y(self, ix0, ix1, iy, f_center, num_modes=4, guess=None, amplitude=1.0):
         import numpy as np
         from scipy.sparse import diags as spdiags
@@ -1027,147 +905,6 @@ class FDTD_2D_Hz:
     def _avg_with_upper_neighbor(self, arr, axis, periodic):
         """Convenience wrapper for averaging with the neighbour at index +1."""
         return self._avg_with_neighbor(arr, axis, periodic, direction=+1)
-
-    def calculate_line_monitor_power_fft(self, monitor_index, window='hann', detrend=True, normal_sign=1.0):
-        """
-        Calculate frequency-domain power flow through one line monitor using FFT.
-
-        The monitor must come from ``run(...)`` and therefore contain collocated
-        time samples for ``Hz``, ``Ex`` and ``Ey``.
-
-        Args
-        ----
-        monitor_index : int
-            Index into ``self.monitor_results``.
-        window : str or None
-            Time-domain window applied before FFT. Supported: ``'hann'``,
-            ``'hamming'``, ``'blackman'``. Use ``None`` for rectangular window.
-        detrend : bool
-            If True, remove per-point DC value before FFT.
-        normal_sign : float
-            Sign of monitor normal direction (+1 or -1).
-
-        Returns
-        -------
-        dict with keys:
-            'freqs'          : positive frequency bins (Hz)
-            'power'          : signed real power through the line (W, per FFT bin)
-            'complex_power'  : complex line power spectrum
-            'power_density'  : complex power density along the line (Nf, Nline)
-            'orientation'    : monitor orientation
-            'normal_sign'    : copied input
-            'monitor_index'  : copied input
-        """
-        if not self.monitor_results:
-            raise RuntimeError("No monitor data found. Run simulation first.")
-
-        m = self.monitor_results[int(monitor_index)]
-        ori = m.get("orientation", "").lower()
-        if ori not in ("horizontal", "vertical"):
-            raise ValueError(f"Unsupported monitor orientation: '{ori}'.")
-
-        Hz = np.asarray(m["Hz"], dtype=float)
-        Ex = np.asarray(m["Ex"], dtype=float)
-        Ey = np.asarray(m["Ey"], dtype=float)
-
-        if Hz.ndim != 2 or Ex.shape != Hz.shape or Ey.shape != Hz.shape:
-            raise ValueError("Monitor arrays must have shape (Nt_monitor, Nline).")
-
-        Nt = Hz.shape[0]
-        if Nt < 2:
-            raise ValueError("Need at least 2 time samples for FFT power calculation.")
-
-        if window is None:
-            w = np.ones(Nt, dtype=float)
-        else:
-            ws = str(window).lower()
-            if ws in ('hann', 'hanning'):
-                w = np.hanning(Nt)
-            elif ws == 'hamming':
-                w = np.hamming(Nt)
-            elif ws == 'blackman':
-                w = np.blackman(Nt)
-            else:
-                raise ValueError("window must be one of: None, 'hann', 'hamming', 'blackman'.")
-
-        if detrend:
-            Hz = Hz - np.mean(Hz, axis=0, keepdims=True)
-            Ex = Ex - np.mean(Ex, axis=0, keepdims=True)
-            Ey = Ey - np.mean(Ey, axis=0, keepdims=True)
-
-        Hz_f = np.fft.rfft(Hz * w[:, None], axis=0) / Nt
-        Ex_f = np.fft.rfft(Ex * w[:, None], axis=0) / Nt
-        Ey_f = np.fft.rfft(Ey * w[:, None], axis=0) / Nt
-        freqs = np.fft.rfftfreq(Nt, d=self.dt)
-
-        if ori == 'horizontal':
-            # Sy = -Ex * Hz / eta0
-            power_density = normal_sign * (-0.5 / self.eta0) * Ex_f * np.conj(Hz_f)
-            dL = self.dx
-        else:
-            # Sx = Ey * Hz / eta0
-            power_density = normal_sign * (0.5 / self.eta0) * Ey_f * np.conj(Hz_f)
-            dL = self.dy
-
-        complex_power = np.sum(power_density, axis=1) * dL
-        power = np.real(complex_power)
-
-        return {
-            "freqs": freqs,
-            "power": power,
-            "complex_power": complex_power,
-            "power_density": power_density,
-            "orientation": ori,
-            "normal_sign": float(normal_sign),
-            "monitor_index": int(monitor_index),
-        }
-
-    def plot_line_monitor_power_fft(self, power_result, db=False, ref_power=None, f_range=None, ax=None):
-        """Plot FFT line-monitor power returned by ``calculate_line_monitor_power_fft``."""
-        import matplotlib.pyplot as plt
-
-        f = np.asarray(power_result["freqs"], dtype=float)
-        p = np.asarray(power_result["power"], dtype=float)
-
-        mask = np.ones_like(f, dtype=bool)
-        if f_range is not None:
-            f0, f1 = float(f_range[0]), float(f_range[1])
-            if f1 < f0:
-                f0, f1 = f1, f0
-            mask &= (f >= f0) & (f <= f1)
-
-        if ax is None:
-            fig, ax = plt.subplots(1, 1, figsize=(7, 4))
-        else:
-            fig = ax.figure
-
-        ff = f[mask]
-        pp = p[mask]
-
-        if db:
-            eps = 1e-30
-            if ref_power is None:
-                ref = max(np.max(np.abs(pp)), eps)
-            else:
-                ref = max(float(ref_power), eps)
-            yy = 10.0 * np.log10(np.maximum(np.abs(pp), eps) / ref)
-            ylabel = 'Line power (dB)'
-        else:
-            yy = pp
-            ylabel = 'Line power (W, signed)'
-
-        ax.plot(ff / 1e9, yy, lw=1.5)
-        if self.f_min is not None:
-            ax.set_xlim(self.f_min / 1e9, self.f_max / 1e9)
-        else:
-            ax.set_xlim(0, self.f_max / 1e9)
-        ax.set_xlabel('Frequency (GHz)')
-        ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.3)
-        ax.set_title(
-            f"FFT power spectrum (monitor {power_result.get('monitor_index', '?')}, {power_result.get('orientation', '?')})")
-        fig.tight_layout()
-        return fig, ax
 
     # ---------- spatial curls ----------
     def calculate_Curl_E(self):
@@ -1695,6 +1432,317 @@ class FDTD_2D_Hz:
         interval_ms = 1000.0 / max(1, fps)
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
+
+    def calculate_source_power_fft(self, source_index=0, window=None, detrend=True):
+        """
+        Calculate the one-sided FFT source spectrum and an aperture-aware power estimate.
+
+        The previous implementation returned power from only the temporal waveform
+        ``g(t)``. Here we additionally scale by a geometry factor so different
+        source kinds (point/line/waveguide/TF-SF) report different injected power
+        levels.
+
+        Parameters
+        ----------
+        source_index : int
+            Index into ``self.sources``.
+        window : str or None
+            Optional time window: ``'hann'``/``'hanning'``, ``'hamming'``,
+            ``'blackman'``, or ``None``.
+        detrend : bool
+            If True, remove the mean before FFT.
+
+        Returns
+        -------
+        dict with keys:
+            'source_index'    : selected source index
+            'source_kind'     : source kind string
+            'freqs'           : one-sided frequencies (Hz)
+            'spectrum'        : one-sided complex waveform spectrum ``G(f)``
+            'waveform_power'  : waveform-only spectrum ``|G(f)|^2``
+            'power'           : geometry-aware source power estimate
+            'geometry_factor' : spatial scaling factor used for ``power``
+            'waveform'        : time-domain source waveform ``g(t)``
+            'time'            : time axis (s)
+        """
+        if len(self.sources) == 0:
+            raise ValueError("No sources available. Add a source before calling calculate_source_power_fft().")
+        if not (0 <= int(source_index) < len(self.sources)):
+            raise IndexError(f"source_index {source_index} out of range for {len(self.sources)} sources.")
+
+        s = self.sources[int(source_index)]
+        t = np.arange(0, self.Nt * self.dt, self.dt)
+        g = np.asarray(self._g(s, t), dtype=float)
+        Nt = g.shape[0]
+        if Nt < 2:
+            raise ValueError("Need at least 2 time samples for FFT power calculation.")
+
+        if detrend:
+            g = g - np.mean(g)
+
+        if window is None:
+            w = np.ones(Nt, dtype=float)
+        else:
+            key = str(window).lower()
+            if key in ('hann', 'hanning'):
+                w = np.hanning(Nt)
+            elif key == 'hamming':
+                w = np.hamming(Nt)
+            elif key == 'blackman':
+                w = np.blackman(Nt)
+            else:
+                raise ValueError("window must be one of: None, 'hann'/'hanning', 'hamming', 'blackman'.")
+
+        spectrum = np.fft.rfft(g * w) / Nt
+        freqs = np.fft.rfftfreq(Nt, d=self.dt)
+        waveform_power = np.abs(spectrum) ** 2
+
+        # Spatial/aperture factor for power normalization.
+        #
+        # Match line-monitor scaling:
+        #   P ~ (1 / (2*eta0)) * integral Re{Et * Ht*} dL
+        # using the source aperture/modal profiles.
+        k = s.get('kind', '')
+        pscale = 0.5 / self.eta0
+
+        if k == 'point':
+            geometry_factor = pscale * (self.dx * self.dy)
+        elif k == 'line-soft':
+            if s['ix0'] != s['ix1']:
+                i0, i1 = int(min(s['ix0'], s['ix1'])), int(max(s['ix0'], s['ix1']))
+                geometry_factor = pscale * (i1 - i0) * self.dx
+            else:
+                j0, j1 = int(min(s['iy0'], s['iy1'])), int(max(s['iy0'], s['iy1']))
+                geometry_factor = pscale * (j1 - j0) * self.dy
+        elif k == 'waveguide-y':
+            Et = np.asarray(s.get('Ex_src', np.array([1.0])), dtype=complex)
+            Ht = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
+            modal_flux = np.sum(np.real((-Et) * np.conj(Ht))) * self.dx
+            geometry_factor = pscale * float(np.abs(modal_flux))
+        elif k == 'waveguide-x':
+            Et = np.asarray(s.get('Ey_src', np.array([1.0])), dtype=complex)
+            Ht = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
+            modal_flux = np.sum(np.real(Et * np.conj(Ht))) * self.dy
+            geometry_factor = pscale * float(np.abs(modal_flux))
+        elif k == 'sftf':
+            nx = max(int(s['ix1'] - s['ix0']) + 1, 0)
+            ny = max(int(s['iy1'] - s['iy0']) + 1, 0)
+            geometry_factor = pscale * float(2.0 * (nx * self.dx + ny * self.dy))
+        else:
+            geometry_factor = pscale
+
+        power = waveform_power * geometry_factor
+
+        return {
+            'source_index': int(source_index),
+            'source_kind': k,
+            'freqs': freqs,
+            'spectrum': spectrum,
+            'waveform_power': waveform_power,
+            'power': power,
+            'geometry_factor': geometry_factor,
+            'waveform': g,
+            'time': t,
+        }
+
+    def calculate_line_monitor_power_fft(self, monitor_index, window=None, detrend=True, normal_sign=1.0):
+        """
+        Calculate frequency-domain power flow through one line monitor using FFT.
+
+        The monitor must come from ``run(...)`` and therefore contain collocated
+        time samples for ``Hz``, ``Ex`` and ``Ey``.
+
+        Args
+        ----
+        monitor_index : int
+            Index into ``self.monitor_results``.
+        window : str or None
+            Time-domain window applied before FFT. Supported: ``'hann'``,
+            ``'hamming'``, ``'blackman'``. ``None`` uses a rectangular window.
+            For propagation-power comparisons between monitors at different
+            distances, keep this as ``None`` to avoid delay-dependent bias.
+        detrend : bool
+            If True, remove per-point DC value before FFT.
+        normal_sign : float
+            Sign of monitor normal direction (+1 or -1).
+
+        Returns
+        -------
+        dict with keys:
+            'freqs'          : positive frequency bins (Hz)
+            'power'          : signed real power through the line (W, per FFT bin)
+            'complex_power'  : complex line power spectrum
+            'power_density'  : complex power density along the line (Nf, Nline)
+            'orientation'    : monitor orientation
+            'normal_sign'    : copied input
+            'monitor_index'  : copied input
+        """
+        if not self.monitor_results:
+            raise RuntimeError("No monitor data found. Run simulation first.")
+
+        m = self.monitor_results[int(monitor_index)]
+        ori = m.get("orientation", "").lower()
+        if ori not in ("horizontal", "vertical"):
+            raise ValueError(f"Unsupported monitor orientation: '{ori}'.")
+
+        Hz = np.asarray(m["Hz"], dtype=float)
+        Ex = np.asarray(m["Ex"], dtype=float)
+        Ey = np.asarray(m["Ey"], dtype=float)
+
+        if Hz.ndim != 2 or Ex.shape != Hz.shape or Ey.shape != Hz.shape:
+            raise ValueError("Monitor arrays must have shape (Nt_monitor, Nline).")
+
+        Nt = Hz.shape[0]
+        if Nt < 2:
+            raise ValueError("Need at least 2 time samples for FFT power calculation.")
+
+        if window is None:
+            w = np.ones(Nt, dtype=float)
+        else:
+            ws = str(window).lower()
+            if ws in ('hann', 'hanning'):
+                w = np.hanning(Nt)
+            elif ws == 'hamming':
+                w = np.hamming(Nt)
+            elif ws == 'blackman':
+                w = np.blackman(Nt)
+            else:
+                raise ValueError("window must be one of: None, 'hann', 'hamming', 'blackman'.")
+
+        if detrend:
+            Hz = Hz - np.mean(Hz, axis=0, keepdims=True)
+            Ex = Ex - np.mean(Ex, axis=0, keepdims=True)
+            Ey = Ey - np.mean(Ey, axis=0, keepdims=True)
+
+        Hz_f = np.fft.rfft(Hz * w[:, None], axis=0) / Nt
+        Ex_f = np.fft.rfft(Ex * w[:, None], axis=0) / Nt
+        Ey_f = np.fft.rfft(Ey * w[:, None], axis=0) / Nt
+        freqs = np.fft.rfftfreq(Nt, d=self.dt)
+
+        if ori == 'horizontal':
+            # Sy = -Ex * Hz / eta0
+            power_density = normal_sign * (-0.5 / self.eta0) * Ex_f * np.conj(Hz_f)
+            dL = self.dx
+        else:
+            # Sx = Ey * Hz / eta0
+            power_density = normal_sign * (0.5 / self.eta0) * Ey_f * np.conj(Hz_f)
+            dL = self.dy
+
+        complex_power = np.sum(power_density, axis=1) * dL
+        power = np.real(complex_power)
+
+        return {
+            "freqs": freqs,
+            "power": power,
+            "complex_power": complex_power,
+            "power_density": power_density,
+            "orientation": ori,
+            "normal_sign": float(normal_sign),
+            "monitor_index": int(monitor_index),
+        }
+
+    def plot_fft_results(self, fft_results, db=False, ref_power=None, f_range=None, ax=None):
+        """
+        Plot one or more FFT power results as traces on the same axis.
+
+        Args
+        ----
+        fft_results : dict or sequence of dict
+            Result(s) returned by ``calculate_line_monitor_power_fft`` and/or
+            ``calculate_source_power_fft``. Each dict must contain
+            ``'freqs'`` and ``'power'``.
+        db : bool
+            Plot in dB if True, otherwise linear signed power.
+        ref_power : float or None
+            dB reference power. If None, use global max over plotted traces.
+        f_range : tuple(float, float) or None
+            Optional frequency range in Hz.
+        ax : matplotlib axis or None
+            Existing axis to draw on. If None, create a new figure.
+        """
+        import matplotlib.pyplot as plt
+
+        if isinstance(fft_results, dict):
+            results = (fft_results,)
+        else:
+            results = tuple(fft_results)
+        if len(results) == 0:
+            raise ValueError("fft_results must contain at least one result dictionary.")
+
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(7, 4))
+            created_fig = True
+        else:
+            fig = ax.figure
+            created_fig = False
+
+        traces = []
+        for idx, res in enumerate(results):
+            if not isinstance(res, dict) or ("freqs" not in res) or ("power" not in res):
+                raise ValueError("Each FFT result must be a dict with keys 'freqs' and 'power'.")
+            f = np.asarray(res["freqs"], dtype=float)
+            p = np.asarray(res["power"], dtype=float)
+            if f.shape != p.shape:
+                raise ValueError("Each FFT result must have matching 'freqs' and 'power' shapes.")
+
+            mask = np.ones_like(f, dtype=bool)
+            if f_range is not None:
+                f0, f1 = float(f_range[0]), float(f_range[1])
+                if f1 < f0:
+                    f0, f1 = f1, f0
+                mask &= (f >= f0) & (f <= f1)
+
+            ff = f[mask]
+            pp = p[mask]
+
+            if "monitor_index" in res:
+                label = f"line monitor {res.get('monitor_index', idx)}"
+                ori = res.get("orientation", None)
+                if ori is not None:
+                    label += f" ({ori})"
+            elif "source_index" in res:
+                label = f"source {res.get('source_index', idx)}"
+                sk = res.get("source_kind", None)
+                if sk is not None:
+                    label += f" ({sk})"
+            else:
+                label = f"trace {idx}"
+
+            traces.append((ff, pp, label))
+
+        if db:
+            eps = 1e-30
+            if ref_power is None:
+                peaks = [np.max(np.abs(pp)) if pp.size else 0.0 for _, pp, _ in traces]
+                ref = max(max(peaks), eps)
+            else:
+                ref = max(float(ref_power), eps)
+            for ff, pp, label in traces:
+                yy = 10.0 * np.log10(np.maximum(np.abs(pp), eps) / ref)
+                ax.plot(ff / 1e9, yy, lw=1.5, label=label)
+            ylabel = 'Power (dB)'
+        else:
+            for ff, pp, label in traces:
+                ax.plot(ff / 1e9, pp, lw=1.5, label=label)
+            ylabel = 'Power (W, signed)'
+
+        if self.f_min is not None:
+            ax.set_xlim(self.f_min / 1e9, self.f_max / 1e9)
+        else:
+            ax.set_xlim(0, self.f_max / 1e9)
+        ax.set_xlabel('Frequency (GHz)')
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.set_title("FFT power spectrum")
+        if len(traces) > 1:
+            ax.legend()
+        fig.tight_layout()
+
+        # Make the figure visible even when called from another imported script.
+        if created_fig and "agg" not in plt.get_backend().lower():
+            fig.show()
+
+        return fig, ax
 
     def NF2FF(self, top=None, bottom=None, left=None, right=None, freqs=None, nphi=361, src_index=None):
         """
