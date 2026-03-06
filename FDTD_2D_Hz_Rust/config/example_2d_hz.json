@@ -1,0 +1,23 @@
+{
+  "x_range": 0.014,
+  "y_range": 0.014,
+  "nx": 120,
+  "ny": 120,
+  "f_max": 100000000000.0,
+  "nt": 1500,
+  "dt": null,
+  "record_stride": 1,
+  "plot_fps": 60,
+  "objects": [
+    { "er": 5.0, "mr": 1.0, "x_range": [0.005, 0.006], "y_range": [0.004, 0.005] }
+  ],
+  "source": {
+    "x": 0.008,
+    "y": 0.004,
+    "amplitude": 3.0,
+    "t0": null,
+    "tw": null,
+    "is_show": true
+  },
+  "output_dir": "output"
+}

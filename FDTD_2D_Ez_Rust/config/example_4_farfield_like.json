@@ -1,0 +1,48 @@
+{
+  "x_range": 0.014,
+  "y_range": 0.014,
+  "nx": 140,
+  "ny": 140,
+  "f_min": 8.0e10,
+  "f_max": 1.2e11,
+  "nt": 1600,
+  "record_stride": 2,
+  "objects": [
+    {"er": 4.0, "mr": 1.0, "x_range": [0.006, 0.008], "y_range": [0.006, 0.007]},
+    {"er": 4.0, "mr": 1.0, "x_range": [0.0055, 0.0085], "y_range": [0.0070, 0.0100]}
+  ],
+  "sources": [
+    {"kind": "waveguide-y", "x": [0.002, 0.012], "y": 0.0061, "amplitude": 2.0, "mode_index": 0, "name": "feed_line"}
+  ],
+  "monitors": [
+    {"x": [0.0021, 0.0119], "y": 0.0119, "name": "top", "normal_sign": 1.0},
+    {"x": [0.0021, 0.0119], "y": 0.0021, "name": "bottom", "normal_sign": -1.0},
+    {"x": 0.0021, "y": [0.0021, 0.0119], "name": "left", "normal_sign": -1.0},
+    {"x": 0.0119, "y": [0.0021, 0.0119], "name": "right", "normal_sign": 1.0}
+  ],
+  "pml": {"enabled": true, "width_cells": 20, "strength": 0.15},
+  "postprocessing": {
+    "compute_source_fft": true,
+    "compute_monitor_fft": true,
+    "nf2ff": {
+      "enabled": true,
+      "top": 0,
+      "bottom": 1,
+      "left": 2,
+      "right": 3,
+      "nphi": 720,
+      "freq_count": 3,
+      "source_index": 0
+    }
+  },
+  "plot": {
+    "fps": 120,
+    "dynamic_clim": false,
+    "clim_smooth": 0.25,
+    "show_source_profiles": false,
+    "show_animation": true,
+    "show_fft": false,
+    "show_nf2ff": true
+  },
+  "output_dir": "output/example4"
+}
