@@ -5,6 +5,11 @@ from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 from tqdm import tqdm
 
+try:
+    from rust_curl_kernel_1d import load_kernel as _load_rust_curl_kernel
+except Exception:
+    _load_rust_curl_kernel = None
+
 
 class FDTD_1D:
     def __init__(self, z_range, Nz, f_max, Nt, dt=None):
@@ -46,14 +51,21 @@ class FDTD_1D:
         self.REF = np.zeros(self.Nf, dtype=complex)
         self.TRN = np.zeros(self.Nf, dtype=complex)
         self.SRC = np.zeros(self.Nf, dtype=complex)
+        self._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
+        self._use_rust_kernel = self._rust_kernel is not None
 
     def _init_mEy_mHx(self):
         self.mEy = self.c0 * self.dt / self.ER
         self.mHx = self.c0 * self.dt / self.MR
 
     def H_Update(self):
-        for nz in range(0, self.Nz - 1):
-            self.Hx[nz] += self.mHx[nz] * (self.Ey[nz + 1] - self.Ey[nz]) / self.dz
+        if self._rust_kernel is not None:
+            used = self._rust_kernel.update_h_interior(self.Hx, self.Ey, self.mHx, self.dz)
+        else:
+            used = False
+        if not used:
+            for nz in range(0, self.Nz - 1):
+                self.Hx[nz] += self.mHx[nz] * (self.Ey[nz + 1] - self.Ey[nz]) / self.dz
 
         if self.right_absorbing_boundary is not True:
             self.Hx[self.Nz - 1] += self.mHx[self.Nz - 1] * (-self.Ey[self.Nz - 1]) / self.dz
@@ -63,8 +75,13 @@ class FDTD_1D:
             self.hx_past = self.Hx[self.Nz - 2]
 
     def E_Update(self):
-        for nz in range(1, self.Nz):
-            self.Ey[nz] += self.mEy[nz] * (self.Hx[nz] - self.Hx[nz - 1]) / self.dz
+        if self._rust_kernel is not None:
+            used = self._rust_kernel.update_e_interior(self.Ey, self.Hx, self.mEy, self.dz)
+        else:
+            used = False
+        if not used:
+            for nz in range(1, self.Nz):
+                self.Ey[nz] += self.mEy[nz] * (self.Hx[nz] - self.Hx[nz - 1]) / self.dz
 
         if self.left_absorbing_boundary is not True:
             self.Ey[0] += self.mEy[0] * self.Hx[0] / self.dz

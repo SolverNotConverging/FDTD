@@ -1,6 +1,6 @@
-from FDTD_2D_Ez_GPU import FDTD_2D_Ez_GPU
+from FDTD_2D_Ez import FDTD_2D_Ez
 
-sim = FDTD_2D_Ez_GPU(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=50e9, f_max=100e9, Nt=4000)
+sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=50e9, f_max=100e9, Nt=4000)
 sim.periodic = ''
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 

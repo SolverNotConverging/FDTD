@@ -2,6 +2,11 @@ import numpy as np
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
 
+try:
+    from rust_curl_kernel_hz import load_kernel as _load_rust_curl_kernel
+except Exception:
+    _load_rust_curl_kernel = None
+
 
 class FDTD_2D_Hz:
     """
@@ -114,6 +119,9 @@ class FDTD_2D_Hz:
         # field monitor dictionary
         self.monitors = []
         self.monitor_results = []
+
+        self._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
+        self._use_rust_kernel = self._rust_kernel is not None
 
     # ---------- geometry helpers ----------
     def add_rectangle(self, ER, MR, x_position, y_position):
@@ -911,6 +919,11 @@ class FDTD_2D_Hz:
         # identical to your implementations (periodic variants)
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
         per_y = hasattr(self, "periodic") and ('y' in self.periodic)
+        if self._rust_kernel is not None:
+            if self._rust_kernel.calculate_curl_e(
+                self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x, self.dx, self.dy, per_x, per_y
+            ):
+                return
 
         if per_y:
             for nx in range(self.Nx):
@@ -948,6 +961,11 @@ class FDTD_2D_Hz:
     def calculate_Curl_H(self):
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
         per_y = hasattr(self, "periodic") and ('y' in self.periodic)
+        if self._rust_kernel is not None:
+            if self._rust_kernel.calculate_curl_h(
+                self.Hz, self.d_Hz_y, self.d_Hz_x, self.dx, self.dy, per_x, per_y
+            ):
+                return
 
         if per_y:
             for nx in range(self.Nx):
@@ -2105,7 +2123,10 @@ class FDTD_2D_Hz:
         sources, PML parameters, monitors definitions **and** monitor_results,
         field histories, etc.
         """
-        return dict(self.__dict__)
+        state = dict(self.__dict__)
+        # ctypes CDLL/function pointers are not pickleable; reload kernel after unpickle.
+        state.pop("_rust_kernel", None)
+        return state
 
     def load_state_dict(self, state: dict):
         """Replace the simulator's state with a provided dictionary.
@@ -2116,6 +2137,8 @@ class FDTD_2D_Hz:
             raise TypeError("state must be a dict produced by state_dict() / save().")
         self.__dict__.clear()
         self.__dict__.update(state)
+        self._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
+        self._use_rust_kernel = self._rust_kernel is not None
 
     def save(self, path: str, include_histories: bool = True):
         """Save the full simulator state to *path* using pickle.
@@ -2162,6 +2185,8 @@ class FDTD_2D_Hz:
         if not isinstance(state, dict):
             raise TypeError("Pickle file does not contain a state dict.")
         sim.__dict__.update(state)
+        sim._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
+        sim._use_rust_kernel = sim._rust_kernel is not None
         return sim
 
     @classmethod
