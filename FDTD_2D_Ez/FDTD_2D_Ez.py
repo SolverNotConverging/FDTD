@@ -18,6 +18,48 @@ class FDTD_2D_Ez:
     """
 
     # ---------- construction ----------
+    @staticmethod
+    def suggest_dx_dt(max_eps_r, max_mu_r, f_max, cells_per_wavelength=25, courant_factor=0.7,
+                      time_samples_per_period=40):
+        """
+        Suggest a high-accuracy square-cell size and time step from the worst-case
+        material and highest simulated frequency.
+
+        Returns a dictionary containing:
+          - dx, dy: recommended 2D cell sizes in meters
+          - dt: recommended time step in seconds
+          - lambda_min: shortest wavelength in the modeled material
+          - refractive_index_max: sqrt(max_eps_r * max_mu_r)
+        """
+        if max_eps_r <= 0 or max_mu_r <= 0 or f_max <= 0:
+            raise ValueError("max_eps_r, max_mu_r, and f_max must all be positive.")
+        if cells_per_wavelength <= 0 or courant_factor <= 0 or time_samples_per_period <= 0:
+            raise ValueError("cells_per_wavelength, courant_factor, and time_samples_per_period must be positive.")
+
+        eps0 = 8.85e-12
+        mu0 = 4e-7 * np.pi
+        c0 = 1 / np.sqrt(eps0 * mu0)
+
+        n_max = np.sqrt(max_eps_r * max_mu_r)
+        lambda_min = c0 / (f_max * n_max)
+        dx = lambda_min / cells_per_wavelength
+        dy = dx
+
+        dt_cfl = np.sqrt(dx ** 2 + dy ** 2) / (2 * c0)
+        dt_freq_sampling = 1.0 / (time_samples_per_period * f_max)
+        dt = min(courant_factor * dt_cfl, dt_freq_sampling)
+
+        return {
+            "dx": dx,
+            "dy": dy,
+            "dt": dt,
+            "lambda_min": lambda_min,
+            "refractive_index_max": n_max,
+            "cells_per_wavelength": cells_per_wavelength,
+            "courant_factor": courant_factor,
+            "time_samples_per_period": time_samples_per_period,
+        }
+
     def __init__(self, x_range, y_range, Nx, Ny, f_max, Nt, f_min=None, dt=None):
         # constants
         self.eps0 = 8.85e-12
