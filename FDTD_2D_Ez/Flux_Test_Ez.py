@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 from FDTD_2D_Ez import FDTD_2D_Ez
 
 sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=50e9, f_max=120e9, Nt=2000)
+sim.config(backend='cpu')
 sim.periodic = ''
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 

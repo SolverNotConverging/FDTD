@@ -1,16 +1,28 @@
 import numpy as np
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
+import warnings
 
 try:
-    from rust_curl_kernel_hz import load_kernel as _load_rust_curl_kernel
-except Exception:
-    _load_rust_curl_kernel = None
+    from . import _cython_kernel_hz as _cython_kernel
+except (ImportError, ValueError):
+    try:
+        import _cython_kernel_hz as _cython_kernel
+    except ImportError:
+        _cython_kernel = None
+
+try:
+    from numba import cuda as _numba_cuda
+except ImportError:
+    _numba_cuda = None
 
 
 class FDTD_2D_Hz:
     """
     2D TEz FDTD with:
+      • exact Yee staggering: Hz(Nx,Ny), Ex(Nx,Ny+1), Ey(Nx+1,Ny)
+      • cell material rasterization and 16×16 subpixel smoothing by default
+      • unified Cython CPU / Numba-CUDA GPU / Python backend selection
       • multiple sources (point, line-soft, SF/TF, modal waveguide ports)
       • PML (sigma profiles on edges)
       • save/load state (.npz) including multi-source + PML settings
@@ -60,7 +72,7 @@ class FDTD_2D_Hz:
             "time_samples_per_period": time_samples_per_period,
         }
 
-    def __init__(self, x_range, y_range, Nx, Ny, f_max, Nt, f_min=None, dt=None):
+    def __init__(self, x_range, y_range, Nx, Ny, f_max, Nt, f_min=None, dt=None, subpixel=16):
         # constants
         self.eps0 = 8.85e-12
         self.mu0 = 4e-7 * np.pi
@@ -74,6 +86,16 @@ class FDTD_2D_Hz:
         self.Ny = int(Ny)
         self.dx = self.x_range / self.Nx
         self.dy = self.y_range / self.Ny
+        self.x_cell = (np.arange(self.Nx, dtype=float) + 0.5) * self.dx
+        self.y_cell = (np.arange(self.Ny, dtype=float) + 0.5) * self.dy
+        self.x_face = np.arange(self.Nx + 1, dtype=float) * self.dx
+        self.y_face = np.arange(self.Ny + 1, dtype=float) * self.dy
+        self.x_Hz, self.y_Hz = self.x_cell, self.y_cell
+        self.x_Ex, self.y_Ex = self.x_cell, self.y_face
+        self.x_Ey, self.y_Ey = self.x_face, self.y_cell
+        if not isinstance(subpixel, (int, np.integer)) or subpixel < 1:
+            raise ValueError("subpixel must be a positive integer.")
+        self.subpixel = int(subpixel)
 
         # time
         self.Nt = int(Nt)
@@ -90,19 +112,32 @@ class FDTD_2D_Hz:
         self.ERxx = np.ones((self.Nx, self.Ny))
         self.ERyy = np.ones((self.Nx, self.Ny))
         self.MRzz = np.ones((self.Nx, self.Ny))
+        self.ERxx_Ex = np.ones((self.Nx, self.Ny + 1))
+        self.ERyy_Ey = np.ones((self.Nx + 1, self.Ny))
+        self.MRzz_Hz = np.ones((self.Nx, self.Ny))
 
         # fields, we use normalized E' D' H' B'
 
         # E'=E, D'=eps0*D, D'=eps_r*E
-        self.Dx = np.zeros((self.Nx, self.Ny))
-        self.Ex = np.zeros((self.Nx, self.Ny))
+        self.Dx = np.zeros((self.Nx, self.Ny + 1))
+        self.Ex = np.zeros((self.Nx, self.Ny + 1))
 
-        self.Dy = np.zeros((self.Nx, self.Ny))
-        self.Ey = np.zeros((self.Nx, self.Ny))
+        self.Dy = np.zeros((self.Nx + 1, self.Ny))
+        self.Ey = np.zeros((self.Nx + 1, self.Ny))
 
         # H' = sqrt(mu0/eps0)*H, B'=sqrt(eps0*mu0)*B, B'=mu_r*H'
         self.Bz = np.zeros((self.Nx, self.Ny))
         self.Hz = np.zeros((self.Nx, self.Ny))
+
+        # Perfect-conductor masks are geometric constraints, not extreme ER/MR.
+        self.PEC_cells = np.zeros((self.Nx, self.Ny), dtype=bool)
+        self.PMC_cells = np.zeros((self.Nx, self.Ny), dtype=bool)
+        self.PEC_Ex = np.zeros_like(self.Ex, dtype=bool)
+        self.PEC_Ey = np.zeros_like(self.Ey, dtype=bool)
+        self.PMC_Hz = np.zeros_like(self.Hz, dtype=bool)
+        self.Ex_update_coeff = np.ones_like(self.Ex)
+        self.Ey_update_coeff = np.ones_like(self.Ey)
+        self.Hz_update_coeff = np.ones_like(self.Hz)
 
         # PML coefficients
         self.pml_width = None
@@ -121,27 +156,27 @@ class FDTD_2D_Hz:
         self.sigma_x = np.zeros((self.Nx, self.Ny))
         self.sigma_y = np.zeros((self.Nx, self.Ny))
 
-        self.b_Dx_y = np.zeros((self.Nx, self.Ny))
-        self.b_Dy_x = np.zeros((self.Nx, self.Ny))
+        self.b_Dx_y = np.zeros((self.Nx, self.Ny + 1))
+        self.b_Dy_x = np.zeros((self.Nx + 1, self.Ny))
         self.b_Bz_x = np.zeros((self.Nx, self.Ny))
         self.b_Bz_y = np.zeros((self.Nx, self.Ny))
 
-        self.c_Dy_x = np.zeros((self.Nx, self.Ny))
-        self.c_Dx_y = np.zeros((self.Nx, self.Ny))
+        self.c_Dy_x = np.zeros((self.Nx + 1, self.Ny))
+        self.c_Dx_y = np.zeros((self.Nx, self.Ny + 1))
         self.c_Bz_x = np.zeros((self.Nx, self.Ny))
         self.c_Bz_y = np.zeros((self.Nx, self.Ny))
 
         # update coefficients
-        self.Psi_Dx_y = np.zeros((self.Nx, self.Ny))
-        self.Psi_Dy_x = np.zeros((self.Nx, self.Ny))
+        self.Psi_Dx_y = np.zeros((self.Nx, self.Ny + 1))
+        self.Psi_Dy_x = np.zeros((self.Nx + 1, self.Ny))
         self.Psi_Bz_x = np.zeros((self.Nx, self.Ny))
         self.Psi_Bz_y = np.zeros((self.Nx, self.Ny))
 
         # curls + integrals
         self.d_Ey_x = np.zeros((self.Nx, self.Ny))
         self.d_Ex_y = np.zeros((self.Nx, self.Ny))
-        self.d_Hz_x = np.zeros((self.Nx, self.Ny))
-        self.d_Hz_y = np.zeros((self.Nx, self.Ny))
+        self.d_Hz_x = np.zeros((self.Nx + 1, self.Ny))
+        self.d_Hz_y = np.zeros((self.Nx, self.Ny + 1))
 
         # multi-source list ---
         # each source is a dict with keys:
@@ -162,31 +197,157 @@ class FDTD_2D_Hz:
         self.monitors = []
         self.monitor_results = []
 
-        self._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
-        self._use_rust_kernel = self._rust_kernel is not None
+        self._cython_kernel = _cython_kernel
+        self._cuda_kernels = None
+        self.config("cpu")
+
+    @staticmethod
+    def _to_x_faces(cell_values):
+        out = np.empty((cell_values.shape[0] + 1, cell_values.shape[1]), dtype=cell_values.dtype)
+        out[0, :] = cell_values[0, :]
+        out[-1, :] = cell_values[-1, :]
+        if cell_values.shape[0] > 1:
+            out[1:-1, :] = 0.5 * (cell_values[:-1, :] + cell_values[1:, :])
+        return out
+
+    @staticmethod
+    def _to_y_faces(cell_values):
+        out = np.empty((cell_values.shape[0], cell_values.shape[1] + 1), dtype=cell_values.dtype)
+        out[:, 0] = cell_values[:, 0]
+        out[:, -1] = cell_values[:, -1]
+        if cell_values.shape[1] > 1:
+            out[:, 1:-1] = 0.5 * (cell_values[:, :-1] + cell_values[:, 1:])
+        return out
+
+    def _average_material_to_yee(self):
+        self.ERxx_Ex = self._to_y_faces(self.ERxx)
+        self.ERyy_Ey = self._to_x_faces(self.ERyy)
+        self.MRzz_Hz[:] = self.MRzz
+
+    def config(self, backend="cpu"):
+        """Select ``cpu`` (Cython) or ``gpu`` (Numba-CUDA), with Python fallback."""
+        requested = str(backend).lower().replace("-", "_")
+        if requested not in {"cpu", "gpu", "python"}:
+            raise ValueError("backend must be 'cpu', 'gpu', or 'python'.")
+        self.backend_requested = requested
+        if requested == "cpu":
+            self.backend = "cython" if self._cython_kernel is not None else "python"
+        elif requested == "gpu":
+            available = _numba_cuda is not None
+            if available:
+                try:
+                    available = bool(_numba_cuda.is_available())
+                except Exception:
+                    available = False
+            if available:
+                self.backend = "numba_cuda"
+                self._init_cuda_kernels()
+            else:
+                self.backend = "python"
+                warnings.warn("Numba-CUDA is unavailable; using Python update loops.", RuntimeWarning)
+        else:
+            self.backend = "python"
+        self._use_cython_kernel = self.backend == "cython"
+        self._use_numba_cuda = self.backend == "numba_cuda"
+        return self
+
+    @staticmethod
+    def _cython_compatible(*arrays):
+        return all(array.dtype == np.float64 and array.flags.c_contiguous for array in arrays)
+
+    @staticmethod
+    def _parse_special_material(ER=None, MR=None, material=None):
+        values = [value.upper() for value in (material, ER, MR) if isinstance(value, str)]
+        if not values:
+            return None
+        if any(value not in {"PEC", "PMC"} for value in values):
+            raise ValueError("Special material must be 'PEC' or 'PMC'.")
+        if len(set(values)) != 1:
+            raise ValueError("A shape cannot be both PEC and PMC.")
+        return values[0]
+
+    def _refresh_conductor_masks(self):
+        self.PEC_Ex.fill(False)
+        self.PEC_Ex[:, :-1] |= self.PEC_cells
+        self.PEC_Ex[:, 1:] |= self.PEC_cells
+        self.PEC_Ey.fill(False)
+        self.PEC_Ey[:-1, :] |= self.PEC_cells
+        self.PEC_Ey[1:, :] |= self.PEC_cells
+        self.PMC_Hz[:] = self.PMC_cells
+
+        self.Ex_update_coeff = (~self.PEC_Ex).astype(float)
+        self.Ey_update_coeff = (~self.PEC_Ey).astype(float)
+        self.Hz_update_coeff = (~self.PMC_Hz).astype(float)
+
+    def _ensure_conductor_state(self):
+        """Add zero conductor masks when loading states from older releases."""
+        cell_shape = (self.Nx, self.Ny)
+        pec = np.asarray(getattr(self, "PEC_cells", np.zeros(cell_shape)), dtype=bool)
+        pmc = np.asarray(getattr(self, "PMC_cells", np.zeros(cell_shape)), dtype=bool)
+        self.PEC_cells = pec.copy() if pec.shape == cell_shape else np.zeros(cell_shape, dtype=bool)
+        self.PMC_cells = pmc.copy() if pmc.shape == cell_shape else np.zeros(cell_shape, dtype=bool)
+        self.PEC_Ex = np.zeros_like(self.Ex, dtype=bool)
+        self.PEC_Ey = np.zeros_like(self.Ey, dtype=bool)
+        self.PMC_Hz = np.zeros_like(self.Hz, dtype=bool)
+        self._refresh_conductor_masks()
+
+    def _draw_conductor_regions(self, ax, add_legend=False):
+        """Draw cell-edge PEC/PMC outlines on a 2D axes."""
+        from matplotlib.lines import Line2D
+
+        x_centers = (np.arange(self.Nx + 2, dtype=float) - 0.5) * self.dx
+        y_centers = (np.arange(self.Ny + 2, dtype=float) - 0.5) * self.dy
+        contours = []
+        legend_handles = []
+        for name, mask, color in (("PEC", self.PEC_cells, "yellow"),
+                                  ("PMC", self.PMC_cells, "blue")):
+            if not np.any(mask):
+                continue
+            padded = np.pad(mask.astype(float), 1)
+            contours.append(ax.contour(x_centers, y_centers, padded.T,
+                                       levels=[0.5], colors=[color],
+                                       linestyles="--", linewidths=1.8,
+                                       zorder=6))
+            legend_handles.append(Line2D([0], [0], color=color, linestyle="--",
+                                         linewidth=1.8, label=name))
+        if add_legend and legend_handles:
+            handles, labels = ax.get_legend_handles_labels()
+            ax.legend(handles=handles + legend_handles,
+                      labels=labels + [handle.get_label() for handle in legend_handles],
+                      loc="upper right")
+        return contours
+
+    def _mark_special_cells(self, cells, material):
+        if material == "PEC":
+            self.PEC_cells[cells] = True
+            self.PMC_cells[cells] = False
+        else:
+            self.PMC_cells[cells] = True
+            self.PEC_cells[cells] = False
+        self._refresh_conductor_masks()
 
     # ---------- geometry helpers ----------
-    def add_rectangle(self, ER, MR, x_position, y_position):
-        if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
-            ERxx_obj = float(ER[0])
-            ERyy_obj = float(ER[1])
-        else:
-            ERxx_obj = float(ER)
-            ERyy_obj = float(ER)
+    def add_rectangle(self, ER=None, MR=None, x_position=None, y_position=None,
+                      subpixel=None, material=None):
+        special = self._parse_special_material(ER, MR, material)
+        if special is None:
+            if ER is None or MR is None:
+                raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
+            if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
+                ERxx_obj = float(ER[0])
+                ERyy_obj = float(ER[1])
+            else:
+                ERxx_obj = float(ER)
+                ERyy_obj = float(ER)
 
-        if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
-            MRzz_obj = float(MR[2])
-        else:
-            MRzz_obj = float(MR)
+            if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
+                MRzz_obj = float(MR[2])
+            else:
+                MRzz_obj = float(MR)
 
         def edge_to_m(val, axis='x'):
             if isinstance(val, (int, np.integer)): return (val * (self.dx if axis == 'x' else self.dy))
             return float(val)
-
-        def interval_overlap(a0, a1, b0, b1):
-            lo = max(a0, b0)
-            hi = min(a1, b1)
-            return max(0.0, hi - lo)
 
         if not (isinstance(x_position, (list, tuple)) and len(x_position) == 2): raise TypeError(
             "x_position must be (x0,x1).")
@@ -211,23 +372,37 @@ class FDTD_2D_Hz:
         i_max = min(Nx - 1, int(np.ceil(x1m / dx)) - 1)
         j_min = max(0, int(np.floor(y0m / dy)))
         j_max = min(Ny - 1, int(np.ceil(y1m / dy)) - 1)
+        if special is not None:
+            cells = np.zeros((Nx, Ny), dtype=bool)
+            xc = (np.arange(i_min, i_max + 1) + 0.5) * dx
+            yc = (np.arange(j_min, j_max + 1) + 0.5) * dy
+            cells[i_min:i_max + 1, j_min:j_max + 1] = (
+                    (xc[:, None] >= x0m) & (xc[:, None] < x1m)
+                    & (yc[None, :] >= y0m) & (yc[None, :] < y1m))
+            self._mark_special_cells(cells, special)
+            return
+
+        nsub = self.subpixel if subpixel is None else subpixel
+        if not isinstance(nsub, (int, np.integer)) or nsub < 1:
+            raise ValueError("subpixel must be a positive integer.")
+        offsets = (np.arange(int(nsub), dtype=float) + 0.5) / int(nsub)
 
         for i in range(i_min, i_max + 1):
-            cell_x0 = i * dx
-            cell_x1 = (i + 1) * dx
-            fx = interval_overlap(x0m, x1m, cell_x0, cell_x1) / dx
-            if fx == 0.0: continue
+            xs = (i + offsets) * dx
             for j in range(j_min, j_max + 1):
-                cell_y0 = j * dy
-                cell_y1 = (j + 1) * dy
-                fy = interval_overlap(y0m, y1m, cell_y0, cell_y1) / dy
-                if fy == 0.0: continue
-                f = fx * fy
+                ys = (j + offsets) * dy
+                f = np.mean((xs[:, None] >= x0m) & (xs[:, None] < x1m)
+                            & (ys[None, :] >= y0m) & (ys[None, :] < y1m))
+                if f == 0.0:
+                    continue
                 self.ERxx[i, j] = (1.0 - f) * self.ERxx[i, j] + f * ERxx_obj
                 self.ERyy[i, j] = (1.0 - f) * self.ERyy[i, j] + f * ERyy_obj
                 self.MRzz[i, j] = (1.0 - f) * self.MRzz[i, j] + f * MRzz_obj
 
-    def add_circle(self, ER, MR, center, radius, nsub=6):
+        self._average_material_to_yee()
+
+    def add_circle(self, ER=None, MR=None, center=None, radius=None, nsub=None,
+                   subpixel=None, material=None):
         """
         Add a (possibly anisotropic) circular object with subpixel edge smoothing.
 
@@ -237,18 +412,21 @@ class FDTD_2D_Hz:
         radius: float, meters.
         nsub: supersamples per axis (nsub x nsub per cell) for area fraction.
         """
-        # --- parse materials (TMz: Ez/Dz along z, Hx/Hy in-plane) ---
-        if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
-            ERxx_obj = float(ER[0])
-            ERyy_obj = float(ER[1])
-        else:
-            ERxx_obj = float(ER)
-            ERyy_obj = float(ER)
+        special = self._parse_special_material(ER, MR, material)
+        if special is None:
+            if ER is None or MR is None:
+                raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
+            if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
+                ERxx_obj = float(ER[0])
+                ERyy_obj = float(ER[1])
+            else:
+                ERxx_obj = float(ER)
+                ERyy_obj = float(ER)
 
-        if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
-            MRzz_obj = float(ER[2])
-        else:
-            MRzz_obj = float(ER)
+            if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
+                MRzz_obj = float(MR[2])
+            else:
+                MRzz_obj = float(MR)
 
         # --- parse geometry ---
         if not (isinstance(center, (list, tuple)) and len(center) == 2):
@@ -289,11 +467,25 @@ class FDTD_2D_Hz:
         if (i_max < i_min) or (j_max < j_min):
             return  # fully outside
 
+        if special is not None:
+            cells = np.zeros((Nx, Ny), dtype=bool)
+            xc = (np.arange(i_min, i_max + 1) + 0.5) * dx
+            yc = (np.arange(j_min, j_max + 1) + 0.5) * dy
+            cells[i_min:i_max + 1, j_min:j_max + 1] = (
+                    (xc[:, None] - cx) ** 2 + (yc[None, :] - cy) ** 2 <= radius ** 2)
+            self._mark_special_cells(cells, special)
+            return
+
         # --- supersampling grid offsets inside a cell ---
         # place nsub sample points uniformly within each cell
         # offsets measured from cell corner (x0,y0) to sample centers
-        if nsub < 1:
-            nsub = 1
+        if subpixel is not None:
+            nsub = subpixel
+        if nsub is None:
+            nsub = self.subpixel
+        if not isinstance(nsub, (int, np.integer)) or nsub < 1:
+            raise ValueError("subpixel must be a positive integer.")
+        nsub = int(nsub)
         sx = (np.arange(nsub) + 0.5) * (dx / nsub)
         sy = (np.arange(nsub) + 0.5) * (dy / nsub)
 
@@ -322,6 +514,77 @@ class FDTD_2D_Hz:
                 self.ERxx[i, j] = (1.0 - f) * self.ERxx[i, j] + f * ERxx_obj
                 self.ERyy[i, j] = (1.0 - f) * self.ERyy[i, j] + f * ERyy_obj
                 self.MRzz[i, j] = (1.0 - f) * self.MRzz[i, j] + f * MRzz_obj
+
+        self._average_material_to_yee()
+
+    def add_triangle(self, ER=None, MR=None, vertices=None, subpixel=None,
+                     material=None):
+        """Add a triangular dielectric, magnetic material, PEC, or PMC region."""
+        special = self._parse_special_material(ER, MR, material)
+        if special is None:
+            if ER is None or MR is None:
+                raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
+            if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
+                ERxx_obj, ERyy_obj = float(ER[0]), float(ER[1])
+            else:
+                ERxx_obj = ERyy_obj = float(ER)
+            MRzz_obj = float(MR[2]) if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3 else float(MR)
+
+        if not (isinstance(vertices, (list, tuple, np.ndarray)) and len(vertices) == 3
+                and all(len(vertex) == 2 for vertex in vertices)):
+            raise TypeError("vertices must contain exactly three (x, y) points.")
+
+        def to_m(value, axis):
+            if isinstance(value, (int, np.integer)):
+                return float(value) * (self.dx if axis == 'x' else self.dy)
+            return float(value)
+
+        points = np.asarray([(to_m(point[0], 'x'), to_m(point[1], 'y'))
+                             for point in vertices], dtype=float)
+        x0, y0 = np.min(points, axis=0)
+        x1, y1 = np.max(points, axis=0)
+        i_min = max(0, int(np.floor(x0 / self.dx)))
+        i_max = min(self.Nx - 1, int(np.ceil(x1 / self.dx)) - 1)
+        j_min = max(0, int(np.floor(y0 / self.dy)))
+        j_max = min(self.Ny - 1, int(np.ceil(y1 / self.dy)) - 1)
+        if i_max < i_min or j_max < j_min:
+            return
+
+        (ax, ay), (bx, by), (cx, cy) = points
+        denominator = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+        if abs(denominator) < 1e-30:
+            raise ValueError("Triangle vertices must not be collinear.")
+
+        def inside(x_values, y_values):
+            wa = ((by - cy) * (x_values - cx) + (cx - bx) * (y_values - cy)) / denominator
+            wb = ((cy - ay) * (x_values - cx) + (ax - cx) * (y_values - cy)) / denominator
+            wc = 1.0 - wa - wb
+            tolerance = 1e-12
+            return (wa >= -tolerance) & (wb >= -tolerance) & (wc >= -tolerance)
+
+        if special is not None:
+            cells = np.zeros((self.Nx, self.Ny), dtype=bool)
+            xs = (np.arange(i_min, i_max + 1) + 0.5) * self.dx
+            ys = (np.arange(j_min, j_max + 1) + 0.5) * self.dy
+            cells[i_min:i_max + 1, j_min:j_max + 1] = inside(xs[:, None], ys[None, :])
+            self._mark_special_cells(cells, special)
+            return
+
+        nsub = self.subpixel if subpixel is None else subpixel
+        if not isinstance(nsub, (int, np.integer)) or nsub < 1:
+            raise ValueError("subpixel must be a positive integer.")
+        offsets = (np.arange(int(nsub), dtype=float) + 0.5) / int(nsub)
+        for i in range(i_min, i_max + 1):
+            xs = (i + offsets) * self.dx
+            for j in range(j_min, j_max + 1):
+                ys = (j + offsets) * self.dy
+                fraction = float(np.mean(inside(xs[:, None], ys[None, :])))
+                if fraction == 0.0:
+                    continue
+                self.ERxx[i, j] = (1.0 - fraction) * self.ERxx[i, j] + fraction * ERxx_obj
+                self.ERyy[i, j] = (1.0 - fraction) * self.ERyy[i, j] + fraction * ERyy_obj
+                self.MRzz[i, j] = (1.0 - fraction) * self.MRzz[i, j] + fraction * MRzz_obj
+        self._average_material_to_yee()
 
         # ---------- PML ----------
 
@@ -384,35 +647,37 @@ class FDTD_2D_Hz:
             raise TypeError("direction must be 'x', 'y', or 'xy'.")
 
     def _init_Coeff(self):
-
-        # b-coeffs
+        self._average_material_to_yee()
         ex1 = self.sigma_x / (self.eps0 * self.kappa_x) + self.alpha_x / self.eps0
-        self.b_Dy_x = np.exp(-ex1 * self.dt)
+        b_x = np.exp(-ex1 * self.dt)
 
         ex2 = self.sigma_y / (self.eps0 * self.kappa_y) + self.alpha_y / self.eps0
-        self.b_Dx_y = np.exp(-ex2 * self.dt)
+        b_y = np.exp(-ex2 * self.dt)
 
         # set b=1 exactly outside PML
         mask_x0 = (self.sigma_x == 0) & (self.alpha_x == 0)
         mask_y0 = (self.sigma_y == 0) & (self.alpha_y == 0)
-        self.b_Dy_x[mask_x0] = 1.0
-        self.b_Dx_y[mask_y0] = 1.0
+        b_x[mask_x0] = 1.0
+        b_y[mask_y0] = 1.0
 
         # c-coeffs with safe division; c=0 where sigma=alpha=0
         den1 = self.sigma_x * self.kappa_x + self.alpha_x * self.kappa_x ** 2
         den2 = self.sigma_y * self.kappa_y + self.alpha_y * self.kappa_y ** 2
 
-        self.c_By_x = np.zeros_like(self.sigma_x)
-        self.c_Bx_y = np.zeros_like(self.sigma_y)
+        c_x = np.zeros_like(self.sigma_x)
+        c_y = np.zeros_like(self.sigma_y)
 
         good1 = den1 != 0
         good2 = den2 != 0
-        self.c_Dy_x[good1] = (self.sigma_x[good1] / den1[good1]) * (self.b_Dy_x[good1] - 1.0)
-        self.c_Dx_y[good2] = (self.sigma_y[good2] / den2[good2]) * (self.b_Dx_y[good2] - 1.0)
+        c_x[good1] = (self.sigma_x[good1] / den1[good1]) * (b_x[good1] - 1.0)
+        c_y[good2] = (self.sigma_y[good2] / den2[good2]) * (b_y[good2] - 1.0)
 
-        # D uses the same b/c as B in TEz
-        self.b_Bz_x, self.b_Bz_y = self.b_Dy_x, self.b_Dx_y
-        self.c_Bz_x, self.c_Bz_y = self.c_Dy_x, self.c_Dx_y
+        self.b_Dy_x, self.c_Dy_x = self._to_x_faces(b_x), self._to_x_faces(c_x)
+        self.b_Dx_y, self.c_Dx_y = self._to_y_faces(b_y), self._to_y_faces(c_y)
+        self.b_Bz_x, self.b_Bz_y = b_x, b_y
+        self.c_Bz_x, self.c_Bz_y = c_x, c_y
+        self.kappa_x_Ey = self._to_x_faces(self.kappa_x)
+        self.kappa_y_Ex = self._to_y_faces(self.kappa_y)
 
     def _g(self, s, t):
         """
@@ -458,10 +723,52 @@ class FDTD_2D_Hz:
         mag = np.abs(S[pos]) + 1e-30
         return float(np.sum(f * mag) / np.sum(mag))
 
+    @staticmethod
+    def _masked_faces(cell_mask):
+        """Return the transverse faces touching any masked cell."""
+        cell_mask = np.asarray(cell_mask, dtype=bool).ravel()
+        faces = np.zeros(cell_mask.size + 1, dtype=bool)
+        if cell_mask.size:
+            faces[0] = cell_mask[0]
+            faces[-1] = cell_mask[-1]
+            faces[1:-1] = cell_mask[:-1] | cell_mask[1:]
+        return faces
+
+    @staticmethod
+    def _solve_reduced_modes(A, B, active, num_modes, guess):
+        """Solve a generalized eigenproblem after eliminating conductor DOFs."""
+        from scipy.linalg import eig
+        from scipy.sparse.linalg import eigs
+
+        active = np.asarray(active, dtype=bool).ravel()
+        indices = np.flatnonzero(active)
+        if indices.size < 1:
+            raise ValueError("The waveguide cross-section contains no unconstrained cells.")
+        A_csr = A.tocsr()
+        B_csr = B.tocsr()
+        A_reduced = A_csr[indices, :][:, indices]
+        B_reduced = B_csr[indices, :][:, indices]
+        count = min(max(1, int(num_modes)), indices.size)
+
+        if indices.size <= 2 or count >= indices.size - 1:
+            values, vectors = eig(A_reduced.toarray(), B_reduced.toarray())
+            finite = np.isfinite(values)
+            values = values[finite]
+            vectors = vectors[:, finite]
+            if values.size == 0:
+                raise ValueError("No finite waveguide modes remain after applying PEC/PMC constraints.")
+            selection = np.argsort(np.abs(values - guess))[:count]
+            values, vectors = values[selection], vectors[:, selection]
+        else:
+            values, vectors = eigs(A_reduced, M=B_reduced, k=count, sigma=guess)
+
+        expanded = np.zeros((active.size, vectors.shape[1]), dtype=complex)
+        expanded[indices, :] = vectors
+        return values, expanded
+
     def _wg_modes_y(self, ix0, ix1, iy, f_center, num_modes=4, guess=None, amplitude=1.0):
         import numpy as np
-        from scipy.sparse import diags as spdiags
-        from scipy.sparse.linalg import eigs
+        from scipy.sparse import diags as spdiags, lil_matrix
 
         lo, hi = (min(ix0, ix1), max(ix0, ix1))
         Nx = int(max(1, hi - lo))
@@ -473,26 +780,33 @@ class FDTD_2D_Hz:
         dx = self.dx
 
         # material vectors along the slice
-        MRzz_vec = np.asarray(self.MRzz[lo:hi, iy], dtype=float)
-        ERxx_vec = np.asarray(self.ERxx[lo:hi, iy], dtype=float)
-        ERyy_vec = np.asarray(self.ERyy[lo:hi, iy], dtype=float)
+        iy_cell = int(np.clip(iy, 0, self.Ny - 1))
+        MRzz_vec = np.asarray(self.MRzz[lo:hi, iy_cell], dtype=float)
+        ERxx_vec = np.asarray(self.ERxx[lo:hi, iy_cell], dtype=float)
+        ERyy_vec = np.asarray(self.ERyy[lo:hi, iy_cell], dtype=float)
+        pec = np.asarray(self.PEC_cells[lo:hi, iy_cell], dtype=bool)
+        pmc = np.asarray(self.PMC_cells[lo:hi, iy_cell], dtype=bool)
 
         # sparse diagonals (NOTE: shape must be a tuple)
         MRzz_diag = spdiags(MRzz_vec, 0, shape=(Nx, Nx))
         ERxx_inv = spdiags(1.0 / ERxx_vec, 0, shape=(Nx, Nx))
-        ERyy_inv = spdiags(1.0 / ERyy_vec, 0, shape=(Nx, Nx))
+        ERyy_face = self._to_x_faces(ERyy_vec[:, None])[:, 0]
+        ERyy_face_inv = spdiags(1.0 / ERyy_face, 0, shape=(Nx + 1, Nx + 1))
 
-        # your difference operators (exact layout and scaling)
-        d_plus = np.ones(Nx)
-        d_minus = -np.ones(Nx)
-        # DEX: offsets [1, 0] / (dx*k0)  -> upper diag = +1, main = -1
-        DEX = spdiags([d_plus, d_minus], [1, 0], shape=(Nx, Nx)) / (dx * k0)
-        # DHX: offsets [0, 1] / (dx*k0)  -> main = +1, lower = -1
-        DHX = spdiags([d_plus, d_minus], [0, -1], shape=(Nx, Nx)) / (dx * k0)
+        G = lil_matrix((Nx + 1, Nx), dtype=float)
+        G[0, 0] = 1.0
+        G[Nx, Nx - 1] = -1.0
+        for i in range(1, Nx):
+            G[i, i] = 1.0
+            G[i, i - 1] = -1.0
+        G = G.tocsr() / (dx * k0)
+        # Hz obeys Neumann data at PEC. PMC retains gradient rows so that
+        # eliminated PMC cells impose the Dirichlet condition Hz = 0.
+        G = spdiags((~self._masked_faces(pec)).astype(float), 0,
+                    shape=(Nx + 1, Nx + 1)) @ G
 
-        # operators
-        A = MRzz_diag + DEX @ (ERxx_inv @ DHX)
-        B = ERyy_inv
+        A = MRzz_diag - G.T @ (ERyy_face_inv @ G)
+        B = ERxx_inv
 
         # shift guess near n_core^2
         if guess is None:
@@ -500,8 +814,8 @@ class FDTD_2D_Hz:
             n_guess = float(np.max(n_slice))
             guess = max(n_guess ** 2, 1.0)
 
-        k = int(max(1, num_modes))
-        evals, evecs = eigs(A, M=B, k=k, sigma=guess)  # complex in general
+        evals, evecs = self._solve_reduced_modes(
+            A, B, ~(pec | pmc), num_modes, guess)
 
         # sort by descending Re(n_eff)
         n_eff = np.sqrt(np.maximum(evals.real, 0.0))
@@ -528,7 +842,10 @@ class FDTD_2D_Hz:
             Ex = Ex.real
 
             # Normalize Ex to max|.| = amplitude
-            norm = 1 / np.max(np.abs(Ex))
+            scale = np.max(np.abs(Ex))
+            if scale < 1e-30:
+                scale = np.max(np.abs(Hz)) + 1e-30
+            norm = float(amplitude) / scale
             Ex = Ex * norm
             Hz = Hz * norm
 
@@ -542,8 +859,7 @@ class FDTD_2D_Hz:
 
     def _wg_modes_x(self, iy0, iy1, ix, f_center, num_modes=4, guess=None, amplitude=1.0):
         import numpy as np
-        from scipy.sparse import diags as spdiags
-        from scipy.sparse.linalg import eigs
+        from scipy.sparse import diags as spdiags, lil_matrix
 
         lo, hi = (min(iy0, iy1), max(iy0, iy1))
         Ny = int(max(1, hi - lo))
@@ -553,29 +869,38 @@ class FDTD_2D_Hz:
         k0 = 2.0 * np.pi * float(f_center) / self.c0
         dy = self.dy
 
-        MRzz_vec = np.asarray(self.MRzz[ix, lo:hi], dtype=float)
-        ERxx_vec = np.asarray(self.ERxx[ix, lo:hi], dtype=float)
-        ERyy_vec = np.asarray(self.ERyy[ix, lo:hi], dtype=float)
+        ix_cell = int(np.clip(ix, 0, self.Nx - 1))
+        MRzz_vec = np.asarray(self.MRzz[ix_cell, lo:hi], dtype=float)
+        ERxx_vec = np.asarray(self.ERxx[ix_cell, lo:hi], dtype=float)
+        ERyy_vec = np.asarray(self.ERyy[ix_cell, lo:hi], dtype=float)
+        pec = np.asarray(self.PEC_cells[ix_cell, lo:hi], dtype=bool)
+        pmc = np.asarray(self.PMC_cells[ix_cell, lo:hi], dtype=bool)
 
         MRzz_diag = spdiags(MRzz_vec, 0, shape=(Ny, Ny))
-        ERxx_inv = spdiags(1.0 / ERxx_vec, 0, shape=(Ny, Ny))
         ERyy_inv = spdiags(1.0 / ERyy_vec, 0, shape=(Ny, Ny))
+        ERxx_face = self._to_y_faces(ERxx_vec[None, :])[0, :]
+        ERxx_face_inv = spdiags(1.0 / ERxx_face, 0, shape=(Ny + 1, Ny + 1))
 
-        d_plus = np.ones(Ny)
-        d_minus = -np.ones(Ny)
-        DEY = spdiags([d_plus, d_minus], [1, 0], shape=(Ny, Ny)) / (dy * k0)
-        DHY = spdiags([d_plus, d_minus], [0, -1], shape=(Ny, Ny)) / (dy * k0)
+        G = lil_matrix((Ny + 1, Ny), dtype=float)
+        G[0, 0] = 1.0
+        G[Ny, Ny - 1] = -1.0
+        for j in range(1, Ny):
+            G[j, j] = 1.0
+            G[j, j - 1] = -1.0
+        G = G.tocsr() / (dy * k0)
+        G = spdiags((~self._masked_faces(pec)).astype(float), 0,
+                    shape=(Ny + 1, Ny + 1)) @ G
 
-        A = MRzz_diag + DHY @ (ERyy_inv @ DEY)
-        B = ERxx_inv
+        A = MRzz_diag - G.T @ (ERxx_face_inv @ G)
+        B = ERyy_inv
 
         if guess is None:
             n_slice = np.sqrt(MRzz_vec * 0.5 * (ERxx_vec + ERyy_vec))
             n_guess = float(np.max(n_slice))
             guess = max(n_guess ** 2, 1.0)
 
-        k = int(max(1, num_modes))
-        evals, evecs = eigs(A, M=B, k=k, sigma=guess)
+        evals, evecs = self._solve_reduced_modes(
+            A, B, ~(pec | pmc), num_modes, guess)
 
         n_eff = np.sqrt(np.maximum(evals.real, 0.0))
         order = np.argsort(-n_eff)
@@ -596,7 +921,10 @@ class FDTD_2D_Hz:
             Ey = Ey.A.squeeze() if hasattr(Ey, "A") else np.asarray(Ey).squeeze()
             Ey = Ey.real
 
-            norm = 1 / np.max(np.abs(Ey))
+            scale = np.max(np.abs(Ey))
+            if scale < 1e-30:
+                scale = np.max(np.abs(Hz)) + 1e-30
+            norm = float(amplitude) / scale
 
             Ey = Ey * norm
             Hz = Hz * norm
@@ -772,6 +1100,10 @@ class FDTD_2D_Hz:
                 num_modes=max(1, int(modes_to_show)),
                 guess=eig_guess, amplitude=float(amplitude)
             )
+            iy_cell = int(np.clip(iy_line, 0, self.Ny - 1))
+            iy_node = int(np.clip(iy_line, 0, self.Ny))
+            Hz_modes[:, self.PMC_Hz[lo:hi, iy_cell]] = 0.0
+            Ex_modes[:, self.PEC_Ex[lo:hi, iy_node]] = 0.0
             # Visualize only the Ex mode profiles; title shows n_eff
             # Visualize Ex and Hz profiles; title shows n_eff
             if is_show:
@@ -830,6 +1162,10 @@ class FDTD_2D_Hz:
                 num_modes=max(1, int(modes_to_show)),
                 guess=eig_guess, amplitude=float(amplitude)
             )
+            ix_cell = int(np.clip(ix_line, 0, self.Nx - 1))
+            ix_node = int(np.clip(ix_line, 0, self.Nx))
+            Hz_modes[:, self.PMC_Hz[ix_cell, lo:hi]] = 0.0
+            Ey_modes[:, self.PEC_Ey[ix_node, lo:hi]] = 0.0
 
             if is_show:
                 import matplotlib.pyplot as plt
@@ -872,13 +1208,15 @@ class FDTD_2D_Hz:
         self.sources.append(s)
 
     # --- Line Monitor ---
-    def add_line_monitor(self, x, y, t=None):
+    def add_line_monitor(self, x, y, t=None, index=None):
         """
         Add a 1D monitors aligned to the grid:
           - horizontal: x = (x0, x1), y = y0
           - vertical  : x = x0,       y = (y0, y1)
         x, y, t can be indices or meters/seconds. Spans can be 2-tuples/lists.
         Time indices are [it0, it1) (end-exclusive).
+        ``index`` is the stable monitor identifier used by NF2FF and power APIs.
+        If omitted, the lowest available non-negative integer is assigned.
 
         Recorded E-field components are averaged to the Yee cell centers and
         time-aligned with Hz so that all samples describe the same physical
@@ -916,12 +1254,39 @@ class FDTD_2D_Hz:
         else:
             it0, it1 = _span(t, self.dt, self.Nt)
 
+        used_indices = {int(m.get("index", position))
+                        for position, m in enumerate(self.monitors)}
+        if index is None:
+            monitor_index = 0
+            while monitor_index in used_indices:
+                monitor_index += 1
+        elif isinstance(index, (int, np.integer)) and int(index) >= 0:
+            monitor_index = int(index)
+        else:
+            raise TypeError("index must be a non-negative integer or None.")
+        if monitor_index in used_indices:
+            raise ValueError(f"Line monitor index {monitor_index} is already in use.")
+
         self.monitors.append({
+            "index": monitor_index,
             "ix0": ix0, "ix1": ix1,
             "iy0": iy0, "iy1": iy1,
             "it0": it0, "it1": it1,
             "orientation": "horizontal" if is_h else "vertical",
         })
+        return monitor_index
+
+    def _monitor_result_by_index(self, monitor_index):
+        """Resolve a stable monitor ID, with positional fallback for old states."""
+        if not self.monitor_results:
+            raise RuntimeError("No monitor data found. Run simulation first.")
+        requested = int(monitor_index)
+        for position, monitor in enumerate(self.monitor_results):
+            if int(monitor.get("index", position)) == requested:
+                return monitor
+        available = [int(monitor.get("index", position))
+                     for position, monitor in enumerate(self.monitor_results)]
+        raise KeyError(f"Monitor index {requested} was not recorded; available indices: {available}.")
 
     def _avg_with_neighbor(self, arr, axis, periodic, direction):
         """Average a Yee-staggered field with the neighbour shifted by *direction*."""
@@ -956,92 +1321,127 @@ class FDTD_2D_Hz:
         """Convenience wrapper for averaging with the neighbour at index +1."""
         return self._avg_with_neighbor(arr, axis, periodic, direction=+1)
 
+    def _init_cuda_kernels(self):
+        if self._cuda_kernels is not None:
+            return
+        cuda = _numba_cuda
+
+        @cuda.jit
+        def curl_e(ex, ey, d_ex_y, d_ey_x, dx, dy):
+            i, j = cuda.grid(2)
+            if i < d_ex_y.shape[0] and j < d_ex_y.shape[1]:
+                d_ex_y[i, j] = (ex[i, j + 1] - ex[i, j]) / dy
+                d_ey_x[i, j] = (ey[i + 1, j] - ey[i, j]) / dx
+
+        @cuda.jit
+        def curl_h(hz, d_hz_y, d_hz_x, dx, dy, periodic_x, periodic_y):
+            i, j = cuda.grid(2)
+            nx, ny = hz.shape
+            if i < nx and j <= ny:
+                if j == 0:
+                    d_hz_y[i, j] = ((hz[i, 0] - hz[i, ny - 1]) if periodic_y else hz[i, 0]) / dy
+                elif j == ny:
+                    d_hz_y[i, j] = ((hz[i, 0] - hz[i, ny - 1]) if periodic_y else -hz[i, ny - 1]) / dy
+                else:
+                    d_hz_y[i, j] = (hz[i, j] - hz[i, j - 1]) / dy
+            if i <= nx and j < ny:
+                if i == 0:
+                    d_hz_x[i, j] = ((hz[0, j] - hz[nx - 1, j]) if periodic_x else hz[0, j]) / dx
+                elif i == nx:
+                    d_hz_x[i, j] = ((hz[0, j] - hz[nx - 1, j]) if periodic_x else -hz[nx - 1, j]) / dx
+                else:
+                    d_hz_x[i, j] = (hz[i, j] - hz[i - 1, j]) / dx
+
+        self._cuda_kernels = (curl_e, curl_h)
+
     # ---------- spatial curls ----------
     def calculate_Curl_E(self):
-        # identical to your implementations (periodic variants)
-        per_x = hasattr(self, "periodic") and ('x' in self.periodic)
-        per_y = hasattr(self, "periodic") and ('y' in self.periodic)
-        if self._rust_kernel is not None:
-            if self._rust_kernel.calculate_curl_e(
-                self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x, self.dx, self.dy, per_x, per_y
-            ):
-                return
-
-        if per_y:
-            for nx in range(self.Nx):
-                for ny in range(self.Ny - 1):
-                    self.d_Ex_y[nx, ny] = (self.Ex[nx, ny + 1] - self.Ex[nx, ny]) / self.dy
-                self.d_Ex_y[nx, self.Ny - 1] = (self.Ex[nx, 0] - self.Ex[nx, self.Ny - 1]) / self.dy
-        else:
-            for nx in range(self.Nx):
-                for ny in range(self.Ny - 1):
-                    self.d_Ex_y[nx, ny] = (self.Ex[nx, ny + 1] - self.Ex[nx, ny]) / self.dy
-                self.d_Ex_y[nx, self.Ny - 1] = (0 - self.Ex[nx, self.Ny - 1]) / self.dy
-
-        if per_x:
-            for ny in range(self.Ny):
-                for nx in range(self.Nx - 1):
-                    self.d_Ey_x[nx, ny] = (self.Ey[nx + 1, ny] - self.Ey[nx, ny]) / self.dx
-                self.d_Ey_x[self.Nx - 1, ny] = (self.Ey[0, ny] - self.Ey[self.Nx - 1, ny]) / self.dx
-        else:
-            for ny in range(self.Ny):
-                for nx in range(self.Nx - 1):
-                    self.d_Ey_x[nx, ny] = (self.Ey[nx + 1, ny] - self.Ey[nx, ny]) / self.dx
-                self.d_Ey_x[self.Nx - 1, ny] = (0 - self.Ey[self.Nx - 1, ny]) / self.dx
+        if self.backend == "cython" and self._cython_compatible(
+                self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x):
+            self._cython_kernel.curl_e(self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x, self.dx, self.dy)
+            return
+        if self.backend == "numba_cuda":
+            ex_d = _numba_cuda.to_device(self.Ex)
+            ey_d = _numba_cuda.to_device(self.Ey)
+            dexy_d = _numba_cuda.device_array_like(self.d_Ex_y)
+            deyx_d = _numba_cuda.device_array_like(self.d_Ey_x)
+            threads = (16, 16)
+            blocks = ((self.Nx + 15) // 16, (self.Ny + 15) // 16)
+            self._cuda_kernels[0][blocks, threads](ex_d, ey_d, dexy_d, deyx_d, self.dx, self.dy)
+            dexy_d.copy_to_host(self.d_Ex_y)
+            deyx_d.copy_to_host(self.d_Ey_x)
+            return
+        for i in range(self.Nx):
+            for j in range(self.Ny):
+                self.d_Ex_y[i, j] = (self.Ex[i, j + 1] - self.Ex[i, j]) / self.dy
+                self.d_Ey_x[i, j] = (self.Ey[i + 1, j] - self.Ey[i, j]) / self.dx
 
     def calcualte_Psi_B(self):
         self.Psi_Bz_x = self.b_Bz_x * self.Psi_Bz_x + self.c_Bz_x * self.d_Ey_x
         self.Psi_Bz_y = self.b_Bz_y * self.Psi_Bz_y + self.c_Bz_y * self.d_Ex_y
 
     def update_B(self):
-        self.Bz = self.Bz - self.M * (
+        self.Bz = self.Bz - self.Hz_update_coeff * self.M * (
                 self.d_Ey_x / self.kappa_x - self.d_Ex_y / self.kappa_y + self.Psi_Bz_x - self.Psi_Bz_y)
 
     def update_H(self):
-        self.Hz = self.Bz / self.MRzz
+        self.Bz[self.PMC_Hz] = 0.0
+        self.Hz = self.Bz / self.MRzz_Hz
+        self.Hz[self.PMC_Hz] = 0.0
 
     def calculate_Curl_H(self):
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
         per_y = hasattr(self, "periodic") and ('y' in self.periodic)
-        if self._rust_kernel is not None:
-            if self._rust_kernel.calculate_curl_h(
-                self.Hz, self.d_Hz_y, self.d_Hz_x, self.dx, self.dy, per_x, per_y
-            ):
-                return
-
-        if per_y:
-            for nx in range(self.Nx):
-                for ny in range(1, self.Ny):
-                    self.d_Hz_y[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx, ny - 1]) / self.dy
-                self.d_Hz_y[nx, 0] = (self.Hz[nx, 0] - self.Hz[nx, self.Ny - 1]) / self.dy
-        else:
-            for nx in range(self.Nx):
-                for ny in range(1, self.Ny):
-                    self.d_Hz_y[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx, ny - 1]) / self.dy
-                self.d_Hz_y[nx, 0] = (self.Hz[nx, 0] - 0) / self.dy
-
-        if per_x:
-            for ny in range(self.Ny):
-                for nx in range(1, self.Nx):
-                    self.d_Hz_x[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx - 1, ny]) / self.dx
-                self.d_Hz_x[0, ny] = (self.Hz[0, ny] - self.Hz[self.Nx - 1, ny]) / self.dx
-        else:
-            for ny in range(self.Ny):
-                for nx in range(1, self.Nx):
-                    self.d_Hz_x[nx, ny] = (self.Hz[nx, ny] - self.Hz[nx - 1, ny]) / self.dx
-                self.d_Hz_x[0, ny] = (self.Hz[0, ny] - 0) / self.dx
+        if self.backend == "cython" and self._cython_compatible(
+                self.Hz, self.d_Hz_y, self.d_Hz_x):
+            self._cython_kernel.curl_h(self.Hz, self.d_Hz_y, self.d_Hz_x,
+                                       self.dx, self.dy, per_x, per_y)
+            return
+        if self.backend == "numba_cuda":
+            hz_d = _numba_cuda.to_device(self.Hz)
+            dhzy_d = _numba_cuda.device_array_like(self.d_Hz_y)
+            dhzx_d = _numba_cuda.device_array_like(self.d_Hz_x)
+            threads = (16, 16)
+            blocks = ((self.Nx + 16) // 16, (self.Ny + 16) // 16)
+            self._cuda_kernels[1][blocks, threads](hz_d, dhzy_d, dhzx_d,
+                                                   self.dx, self.dy, per_x, per_y)
+            dhzy_d.copy_to_host(self.d_Hz_y)
+            dhzx_d.copy_to_host(self.d_Hz_x)
+            return
+        for i in range(self.Nx):
+            for j in range(self.Ny + 1):
+                if j == 0:
+                    self.d_Hz_y[i, j] = ((self.Hz[i, 0] - self.Hz[i, -1]) if per_y else self.Hz[i, 0]) / self.dy
+                elif j == self.Ny:
+                    self.d_Hz_y[i, j] = ((self.Hz[i, 0] - self.Hz[i, -1]) if per_y else -self.Hz[i, -1]) / self.dy
+                else:
+                    self.d_Hz_y[i, j] = (self.Hz[i, j] - self.Hz[i, j - 1]) / self.dy
+        for i in range(self.Nx + 1):
+            for j in range(self.Ny):
+                if i == 0:
+                    self.d_Hz_x[i, j] = ((self.Hz[0, j] - self.Hz[-1, j]) if per_x else self.Hz[0, j]) / self.dx
+                elif i == self.Nx:
+                    self.d_Hz_x[i, j] = ((self.Hz[0, j] - self.Hz[-1, j]) if per_x else -self.Hz[-1, j]) / self.dx
+                else:
+                    self.d_Hz_x[i, j] = (self.Hz[i, j] - self.Hz[i - 1, j]) / self.dx
 
     def calcualte_Psi_D(self):
         self.Psi_Dx_y = self.b_Dx_y * self.Psi_Dx_y + self.c_Dx_y * self.d_Hz_y
         self.Psi_Dy_x = self.b_Dy_x * self.Psi_Dy_x + self.c_Dy_x * self.d_Hz_x
 
     def update_D(self):
-        self.Dx += self.M * (self.d_Hz_y / self.kappa_y + self.Psi_Dx_y)
-        self.Dy -= self.M * (self.d_Hz_x / self.kappa_x + self.Psi_Dy_x)
+        self.Dx += self.Ex_update_coeff * self.M * (
+                self.d_Hz_y / self.kappa_y_Ex + self.Psi_Dx_y)
+        self.Dy -= self.Ey_update_coeff * self.M * (
+                self.d_Hz_x / self.kappa_x_Ey + self.Psi_Dy_x)
 
     def update_E(self):
-        self.Ex = self.Dx / self.ERxx
-        self.Ey = self.Dy / self.ERyy
+        self.Dx[self.PEC_Ex] = 0.0
+        self.Dy[self.PEC_Ey] = 0.0
+        self.Ex = self.Dx / self.ERxx_Ex
+        self.Ey = self.Dy / self.ERyy_Ey
+        self.Ex[self.PEC_Ex] = 0.0
+        self.Ey[self.PEC_Ey] = 0.0
 
     # ---------- main loop ----------
     def run(self, record_stride=1, is_include_history=True):
@@ -1060,8 +1460,8 @@ class FDTD_2D_Hz:
             self.Nt_rec = int(Nt_rec)
             # allocate histories with compact dtype (float32) to reduce RAM
             dtype_hist = self.Ex.dtype  # or: np.float32
-            self.Ex_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
-            self.Ey_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
+            self.Ex_history = np.zeros((Nt_rec, Nx, Ny + 1), dtype=dtype_hist)
+            self.Ey_history = np.zeros((Nt_rec, Nx + 1, Ny), dtype=dtype_hist)
             self.Hz_history = np.zeros((Nt_rec, Nx, Ny), dtype=dtype_hist)
             rec_idx = 0
         else:
@@ -1137,28 +1537,32 @@ class FDTD_2D_Hz:
                         t_edge = t_now - s["Ey_delay_xlo"]  # vector over j
                         Ey_inc = (kx / k0) * self._g(s, t_edge)  # TEz plane-wave relation
                         for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
-                            self.d_Ey_x[ix_lo - 1, j] -= Ey_inc[j_off] / self.dx
+                            if 0 <= j < self.Ny:
+                                self.d_Ey_x[ix_lo - 1, j] -= Ey_inc[j_off] / self.dx
 
                     # --- Right edge: Ey tangential, normal = +x ---
                     if ix_hi - 1 >= 0 and ix_hi - 1 < self.Nx:
                         t_edge = t_now - s["Ey_delay_xhi"]
                         Ey_inc = (kx / k0) * self._g(s, t_edge)
                         for j_off, j in enumerate(range(iy_lo, iy_hi + 1)):
-                            self.d_Ey_x[ix_hi, j] += Ey_inc[j_off] / self.dx
+                            if 0 <= j < self.Ny:
+                                self.d_Ey_x[ix_hi, j] += Ey_inc[j_off] / self.dx
 
                     # --- Bottom edge: Ex tangential, normal = -y ---
                     if iy_lo - 1 >= 0:
                         t_edge = t_now - s["Ex_delay_ylo"]  # vector over i
                         Ex_inc = -(ky / k0) * self._g(s, t_edge)
                         for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
-                            self.d_Ex_y[i, iy_lo - 1] -= Ex_inc[i_off] / self.dy
+                            if 0 <= i < self.Nx:
+                                self.d_Ex_y[i, iy_lo - 1] -= Ex_inc[i_off] / self.dy
 
                     # --- Top edge: Ex tangential, normal = +y ---
                     if iy_hi - 1 >= 0 and iy_hi - 1 < self.Ny:
                         t_edge = t_now - s["Ex_delay_yhi"]
                         Ex_inc = -(ky / k0) * self._g(s, t_edge)
                         for i_off, i in enumerate(range(ix_lo, ix_hi + 1)):
-                            self.d_Ex_y[i, iy_hi] += Ex_inc[i_off] / self.dy
+                            if 0 <= i < self.Nx:
+                                self.d_Ex_y[i, iy_hi] += Ex_inc[i_off] / self.dy
 
                 # E injection (waveguide-y)
                 elif s['kind'] == 'waveguide-y':
@@ -1276,8 +1680,8 @@ class FDTD_2D_Hz:
 
             if monitor_results:
                 Hz_center = 0.5 * (self.Hz + Hz_prev)
-                Ex_center = self._avg_with_upper_neighbor(self.Ex, axis=1, periodic=per_y)
-                Ey_center = self._avg_with_upper_neighbor(self.Ey, axis=0, periodic=per_x)
+                Ex_center = 0.5 * (self.Ex[:, :-1] + self.Ex[:, 1:])
+                Ey_center = 0.5 * (self.Ey[:-1, :] + self.Ey[1:, :])
 
             # --- capture monitors at this step (no squeeze; direct 1D writes) ---
             for buf in monitor_results:
@@ -1312,7 +1716,7 @@ class FDTD_2D_Hz:
         """
         2x2: [ n-map , Hx ]
              [  Hy   , Ez ]
-        Adds red markers/lines for sources and black translucent PML patches.
+        Adds source/monitor markers, PML patches, and conductor outlines.
         """
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
@@ -1394,6 +1798,8 @@ class FDTD_2D_Hz:
                     Rectangle((0, self.y_range - yw), self.x_range, yw, facecolor='black', alpha=0.3, lw=0))
 
         add_pml(ax_n)
+        for axis in axes.ravel():
+            self._draw_conductor_regions(axis, add_legend=(axis is ax_n))
 
         # --- draw sources as red markers/lines ---
         def draw_sources(ax):
@@ -1493,6 +1899,32 @@ class FDTD_2D_Hz:
         anim = FuncAnimation(fig, _update, frames=self.Nt_rec, interval=interval_ms, blit=True, repeat=False)
         plt.show()
 
+    def _source_geometry_factor(self, source):
+        """Return the aperture/modal factor used to convert |G(f)|² to power."""
+        kind = source.get("kind", "")
+        scale = 0.5 / self.eta0
+        if kind == "point":
+            return scale * self.dx * self.dy
+        if kind == "line-soft":
+            if source["ix0"] != source["ix1"]:
+                return scale * abs(int(source["ix1"]) - int(source["ix0"])) * self.dx
+            return scale * abs(int(source["iy1"]) - int(source["iy0"])) * self.dy
+        if kind == "waveguide-y":
+            electric = np.asarray(source.get("Ex_src", np.array([1.0])), dtype=complex)
+            magnetic = np.asarray(source.get("Hz_src", np.array([1.0])), dtype=complex)
+            flux = np.sum(np.real((-electric) * np.conj(magnetic))) * self.dx
+            return scale * float(np.abs(flux))
+        if kind == "waveguide-x":
+            electric = np.asarray(source.get("Ey_src", np.array([1.0])), dtype=complex)
+            magnetic = np.asarray(source.get("Hz_src", np.array([1.0])), dtype=complex)
+            flux = np.sum(np.real(electric * np.conj(magnetic))) * self.dy
+            return scale * float(np.abs(flux))
+        if kind == "sftf":
+            nx = max(int(source["ix1"] - source["ix0"]) + 1, 0)
+            ny = max(int(source["iy1"] - source["iy0"]) + 1, 0)
+            return scale * 2.0 * (nx * self.dx + ny * self.dy)
+        return scale
+
     def calculate_source_power_fft(self, source_index=0, window=None, detrend=True):
         """
         Calculate the one-sided FFT source spectrum and an aperture-aware power estimate.
@@ -1563,33 +1995,7 @@ class FDTD_2D_Hz:
         #   P ~ (1 / (2*eta0)) * integral Re{Et * Ht*} dL
         # using the source aperture/modal profiles.
         k = s.get('kind', '')
-        pscale = 0.5 / self.eta0
-
-        if k == 'point':
-            geometry_factor = pscale * (self.dx * self.dy)
-        elif k == 'line-soft':
-            if s['ix0'] != s['ix1']:
-                i0, i1 = int(min(s['ix0'], s['ix1'])), int(max(s['ix0'], s['ix1']))
-                geometry_factor = pscale * (i1 - i0) * self.dx
-            else:
-                j0, j1 = int(min(s['iy0'], s['iy1'])), int(max(s['iy0'], s['iy1']))
-                geometry_factor = pscale * (j1 - j0) * self.dy
-        elif k == 'waveguide-y':
-            Et = np.asarray(s.get('Ex_src', np.array([1.0])), dtype=complex)
-            Ht = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
-            modal_flux = np.sum(np.real((-Et) * np.conj(Ht))) * self.dx
-            geometry_factor = pscale * float(np.abs(modal_flux))
-        elif k == 'waveguide-x':
-            Et = np.asarray(s.get('Ey_src', np.array([1.0])), dtype=complex)
-            Ht = np.asarray(s.get('Hz_src', np.array([1.0])), dtype=complex)
-            modal_flux = np.sum(np.real(Et * np.conj(Ht))) * self.dy
-            geometry_factor = pscale * float(np.abs(modal_flux))
-        elif k == 'sftf':
-            nx = max(int(s['ix1'] - s['ix0']) + 1, 0)
-            ny = max(int(s['iy1'] - s['iy0']) + 1, 0)
-            geometry_factor = pscale * float(2.0 * (nx * self.dx + ny * self.dy))
-        else:
-            geometry_factor = pscale
+        geometry_factor = self._source_geometry_factor(s)
 
         power = waveform_power * geometry_factor
 
@@ -1615,7 +2021,7 @@ class FDTD_2D_Hz:
         Args
         ----
         monitor_index : int
-            Index into ``self.monitor_results``.
+            Stable identifier passed to ``add_line_monitor(index=...)``.
         window : str or None
             Time-domain window applied before FFT. Supported: ``'hann'``,
             ``'hamming'``, ``'blackman'``. ``None`` uses a rectangular window.
@@ -1637,10 +2043,7 @@ class FDTD_2D_Hz:
             'normal_sign'    : copied input
             'monitor_index'  : copied input
         """
-        if not self.monitor_results:
-            raise RuntimeError("No monitor data found. Run simulation first.")
-
-        m = self.monitor_results[int(monitor_index)]
+        m = self._monitor_result_by_index(monitor_index)
         ori = m.get("orientation", "").lower()
         if ori not in ("horizontal", "vertical"):
             raise ValueError(f"Unsupported monitor orientation: '{ori}'.")
@@ -1698,8 +2101,125 @@ class FDTD_2D_Hz:
             "power_density": power_density,
             "orientation": ori,
             "normal_sign": float(normal_sign),
-            "monitor_index": int(monitor_index),
+            "monitor_index": int(m.get("index", monitor_index)),
         }
+
+    def power_spectrum(self, monitor_index, freqs, source_index,
+                       normal_sign=1.0, window=None, detrend=True):
+        """Return line-integrated power versus frequency, normalized by source power."""
+        monitor = self._monitor_result_by_index(monitor_index)
+        requested = np.asarray(freqs, dtype=float)
+        if requested.ndim == 0:
+            requested = requested.reshape(1)
+        if requested.ndim != 1 or requested.size == 0:
+            raise ValueError("freqs must be a non-empty scalar or 1D array.")
+        if not np.all(np.isfinite(requested)) or np.any(requested < 0.0):
+            raise ValueError("freqs must contain finite, non-negative frequencies.")
+        if np.any(requested > 0.5 / self.dt):
+            raise ValueError("Requested frequency exceeds the Nyquist frequency.")
+
+        def _window(length):
+            if window is None:
+                return np.ones(length, dtype=float)
+            key = str(window).lower()
+            if key in ("hann", "hanning"):
+                return np.hanning(length)
+            if key == "hamming":
+                return np.hamming(length)
+            if key == "blackman":
+                return np.blackman(length)
+            raise ValueError("window must be one of: None, 'hann', 'hamming', 'blackman'.")
+
+        def _dft(series, time):
+            values = np.asarray(series, dtype=float)
+            if values.shape[0] != time.size or time.size < 2:
+                raise ValueError("Monitor/source time data must contain at least two matching samples.")
+            if detrend:
+                values = values - np.mean(values, axis=0, keepdims=True)
+            weights = _window(time.size)
+            coherent_gain = max(float(np.sum(weights)), 1e-30)
+            kernel = (np.exp(-1j * 2.0 * np.pi * requested[:, None] * time[None, :])
+                      * weights[None, :] / coherent_gain)
+            return kernel @ values
+
+        orientation = str(monitor.get("orientation", "")).lower()
+        if orientation not in ("horizontal", "vertical"):
+            raise ValueError(f"Unsupported monitor orientation: '{orientation}'.")
+        time = np.arange(int(monitor["it0"]), int(monitor["it1"])) * self.dt
+        Hz_f = _dft(monitor["Hz"], time)
+        Ex_f = _dft(monitor["Ex"], time)
+        Ey_f = _dft(monitor["Ey"], time)
+
+        if orientation == "horizontal":
+            raw_density = float(normal_sign) * (-0.5 / self.eta0) * Ex_f * np.conj(Hz_f)
+            dL = self.dx
+        else:
+            raw_density = float(normal_sign) * (0.5 / self.eta0) * Ey_f * np.conj(Hz_f)
+            dL = self.dy
+
+        source_index = int(source_index)
+        if not (0 <= source_index < len(self.sources)):
+            raise IndexError(f"source_index {source_index} out of range for {len(self.sources)} sources.")
+        source = self.sources[source_index]
+        source_time = np.arange(self.Nt) * self.dt
+        source_waveform = np.asarray(self._g(source, source_time), dtype=float)
+        source_spectrum = _dft(source_waveform[:, None], source_time).ravel()
+        source_power = np.abs(source_spectrum) ** 2 * self._source_geometry_factor(source)
+        threshold = 1e-12 * max(float(np.max(source_power)), 1e-30)
+        valid_source = source_power >= threshold
+        raw_complex_power = np.sum(raw_density, axis=1) * dL
+        complex_power = np.zeros_like(raw_complex_power)
+        complex_power[valid_source] = raw_complex_power[valid_source] / source_power[valid_source]
+        return {
+            "freqs": requested,
+            "power": np.real(complex_power),
+            "complex_power": complex_power,
+            "raw_power": np.real(raw_complex_power),
+            "raw_complex_power": raw_complex_power,
+            "source_power": source_power,
+            "orientation": orientation,
+            "normal_sign": float(normal_sign),
+            "monitor_index": int(monitor.get("index", monitor_index)),
+            "source_index": source_index,
+            "source_spectrum": source_spectrum,
+            "valid_source": valid_source,
+            "normalized": True,
+        }
+
+    def plot_power_spectrum(self, power_spectrum, db=False, ax=None):
+        """Plot source-normalized, integrated plane power versus frequency."""
+        import matplotlib.pyplot as plt
+
+        if not isinstance(power_spectrum, dict):
+            raise TypeError("power_spectrum must be returned by self.power_spectrum().")
+        freqs = np.asarray(power_spectrum.get("freqs"), dtype=float)
+        power = np.asarray(power_spectrum.get("power"), dtype=float)
+        if power.shape != freqs.shape:
+            raise ValueError("Power-spectrum arrays have inconsistent shapes.")
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(7, 4))
+            created_fig = True
+        else:
+            fig, created_fig = ax.figure, False
+
+        if db:
+            plotted = 10.0 * np.log10(np.maximum(np.abs(power), 1e-30))
+        else:
+            plotted = power
+        ax.plot(freqs / 1e9, plotted, linewidth=1.5,
+                label=f"monitor {power_spectrum.get('monitor_index')}")
+        ax.set_xlabel("Frequency (GHz)")
+        if db:
+            ax.set_ylabel("Normalized plane power (dB; 0 dB = source power)")
+        else:
+            ax.set_ylabel("Normalized plane power")
+        ax.set_title(f"Plane power spectrum: monitor {power_spectrum.get('monitor_index')}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        if created_fig and "agg" not in plt.get_backend().lower():
+            fig.show()
+        return fig, ax
 
     def plot_fft_results(self, fft_results, db=False, ref_power=None, f_range=None, ax=None):
         """
@@ -1814,7 +2334,8 @@ class FDTD_2D_Hz:
         Args
         ----
         top, bottom, left, right : int or None
-            Indices into self.monitor_results for the sides of the box.
+            Stable IDs assigned by ``add_line_monitor(index=...)``. Any side
+            may be ``None`` and contributes zero to the surface integral.
             'top'   : y = y_high (horizontal, x from x1->x2)
             'bottom': y = y_low  (horizontal, x from x1->x2)
             'left'  : x = x_low  (vertical,   y from y1->y2)
@@ -1859,14 +2380,13 @@ class FDTD_2D_Hz:
             raise ValueError("At least one of top/bottom/left/right must be provided.")
 
         # --- get monitors
-        M = self.monitor_results
         need_orientation = {"top": "horizontal", "bottom": "horizontal", "left": "vertical", "right": "vertical"}
         side_monitors = {}
         for side, idx in side_indices.items():
             if idx is None:
                 side_monitors[side] = None
                 continue
-            m = M[int(idx)]
+            m = self._monitor_result_by_index(idx)
             ori = m.get("orientation", "").lower()
             if ori != need_orientation[side]:
                 raise ValueError(f"Monitor {idx} must be {need_orientation[side]}, got '{ori}'.")
@@ -2009,7 +2529,8 @@ class FDTD_2D_Hz:
             phi=phi, freqs=freqs,
             Etheta=Eθ, Ephi=Eφ,
             Htheta=Hθ, Hphi=Hφ,
-            Ptheta=Pθ, Pphi=Pφ
+            Ptheta=Pθ, Pphi=Pφ,
+            monitor_indices=dict(side_indices),
         )
 
         # optionally expose the source spectrum used (handy for debugging)
@@ -2166,8 +2687,8 @@ class FDTD_2D_Hz:
         field histories, etc.
         """
         state = dict(self.__dict__)
-        # ctypes CDLL/function pointers are not pickleable; reload kernel after unpickle.
-        state.pop("_rust_kernel", None)
+        state.pop("_cython_kernel", None)
+        state.pop("_cuda_kernels", None)
         return state
 
     def load_state_dict(self, state: dict):
@@ -2179,8 +2700,10 @@ class FDTD_2D_Hz:
             raise TypeError("state must be a dict produced by state_dict() / save().")
         self.__dict__.clear()
         self.__dict__.update(state)
-        self._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
-        self._use_rust_kernel = self._rust_kernel is not None
+        self._ensure_conductor_state()
+        self._cython_kernel = _cython_kernel
+        self._cuda_kernels = None
+        self.config(getattr(self, "backend_requested", "cpu"))
 
     def save(self, path: str, include_histories: bool = True):
         """Save the full simulator state to *path* using pickle.
@@ -2195,7 +2718,7 @@ class FDTD_2D_Hz:
         state = self.state_dict()
 
         if not include_histories:
-            for k in ("Hx_history", "Hy_history", "Ez_history", "Dz_history"):
+            for k in ("Ex_history", "Ey_history", "Hz_history"):
                 if k in state:
                     state[k] = type(state[k])()  # empty like its type
 
@@ -2227,8 +2750,10 @@ class FDTD_2D_Hz:
         if not isinstance(state, dict):
             raise TypeError("Pickle file does not contain a state dict.")
         sim.__dict__.update(state)
-        sim._rust_kernel = _load_rust_curl_kernel() if _load_rust_curl_kernel is not None else None
-        sim._use_rust_kernel = sim._rust_kernel is not None
+        sim._ensure_conductor_state()
+        sim._cython_kernel = _cython_kernel
+        sim._cuda_kernels = None
+        sim.config(getattr(sim, "backend_requested", "cpu"))
         return sim
 
     @classmethod

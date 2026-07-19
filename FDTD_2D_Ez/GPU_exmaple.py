@@ -1,8 +1,8 @@
-"""Minimal example showing how to run :class:`FDTD_2D_Ez_GPU` on a GPU."""
+"""Run the unified TMz solver with its Numba-CUDA backend."""
 
-from FDTD_2D_Ez_GPU import FDTD_2D_Ez_GPU
+from FDTD_2D_Ez import FDTD_2D_Ez
 
-sim = FDTD_2D_Ez_GPU(
+sim = FDTD_2D_Ez(
     x_range=12e-3,
     y_range=12e-3,
     Nx=120,
@@ -11,7 +11,8 @@ sim = FDTD_2D_Ez_GPU(
     f_max=90e9,
     Nt=2000,
 )
-print(f"Running 2D Ez GPU solver on {sim.device}…")
+sim.config(backend='gpu')
+print(f"Requested GPU; selected backend: {sim.backend}")
 
 # Periodic BC disabled for this example.
 sim.periodic = ''

@@ -4,12 +4,13 @@ from FDTD_2D_Hz import FDTD_2D_Hz
 
 f_min, f_max = 0e9, 50e9
 sim = FDTD_2D_Hz(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=10000)
+sim.config(backend='cpu')
 sim.periodic = ''
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 
-sim.add_circle(ER=6, MR=1, center=(7e-3, 7e-3), radius=2e-3, nsub=6)
+sim.add_circle(material='PEC', center=(7e-3, 7e-3), radius=2e-3)
 
-theta = np.deg2rad(0)
+theta = np.deg2rad(30)
 sim.add_source(
     kind='sftf',
     x=(30, 110),

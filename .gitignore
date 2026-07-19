@@ -70,12 +70,15 @@ Thumbs.db
 
 *.pkl
 
-# Rust kernels
+# Compiled extension binaries
 **/rust_kernel/target/
 *.dylib
 *.dll
+*.pyd
 
 # Generated simulation outputs
 *.npz
+*.h5
+*.hdf5
 *.gif
 *.mp4
