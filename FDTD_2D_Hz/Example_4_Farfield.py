@@ -5,7 +5,7 @@ from FDTD_2D_Hz import FDTD_2D_Hz
 f_min = 30e9
 f_max = 50e9
 
-sim = FDTD_2D_Hz(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=2000)
+sim = FDTD_2D_Hz(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=4000)
 sim.config(backend='cpu')
 sim.periodic = ''
 sim.add_PML(pml_width=20, direction='xy')

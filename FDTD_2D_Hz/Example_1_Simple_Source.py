@@ -5,9 +5,12 @@ sim.config(backend='cpu')
 sim.periodic = ''
 sim.add_PML(pml_width=20, order=3, direction='xy', kappa_max=7, alpha_max=0.025)
 
-sim.add_rectangle(ER=[5, 6, 7], MR=1, x_position=(5e-3, 6e-3), y_position=(4e-3, 5e-3))
-sim.add_circle(ER=5, MR=1, center=(10e-3, 10e-3), radius=1.25e-3, subpixel=16)
-sim.add_triangle(ER=3.5, MR=1,
+sim.add_material("anisotropic", epsilon_r=(5, 6, 7), sigma_e=(0.02, 0.03, 0))
+sim.add_material("high_index", epsilon_r=5)
+sim.add_material("triangle", epsilon_r=3.5)
+sim.add_rectangle(material="anisotropic", x_position=(5e-3, 6e-3), y_position=(4e-3, 5e-3))
+sim.add_circle(material="high_index", center=(10e-3, 10e-3), radius=1.25e-3, subpixel=16)
+sim.add_triangle(material="triangle",
                  vertices=((2e-3, 9e-3), (4e-3, 9e-3), (3e-3, 11e-3)))
 sim.add_circle(material="PMC", center=(11.5e-3, 4.5e-3), radius=0.5e-3)
 

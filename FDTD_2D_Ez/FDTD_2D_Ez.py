@@ -3,6 +3,8 @@ from matplotlib.patches import Rectangle
 from tqdm import tqdm
 import warnings
 
+from FDTD_common import Material, as_triple
+
 try:
     from . import _cython_kernel_ez as _cython_kernel
 except (ImportError, ValueError):
@@ -112,9 +114,19 @@ class FDTD_2D_Ez:
         self.ERzz = np.ones((self.Nx, self.Ny))
         self.MRxx = np.ones((self.Nx, self.Ny))
         self.MRyy = np.ones((self.Nx, self.Ny))
+        self.SIGEzz = np.zeros((self.Nx, self.Ny))
+        self.SIGMxx = np.zeros((self.Nx, self.Ny))
+        self.SIGMyy = np.zeros((self.Nx, self.Ny))
         self.ERzz_Ez = np.ones((self.Nx + 1, self.Ny + 1))
         self.MRxx_Hx = np.ones((self.Nx + 1, self.Ny))
         self.MRyy_Hy = np.ones((self.Nx, self.Ny + 1))
+        self.SIGEzz_Ez = np.zeros((self.Nx + 1, self.Ny + 1))
+        self.SIGMxx_Hx = np.zeros((self.Nx + 1, self.Ny))
+        self.SIGMyy_Hy = np.zeros((self.Nx, self.Ny + 1))
+        self.materials = {}
+        self.add_material("vacuum")
+        self.add_material("PEC", kind="PEC")
+        self.add_material("PMC", kind="PMC")
 
         # fields, we use normalized E' D' H' B'
 
@@ -139,6 +151,12 @@ class FDTD_2D_Ez:
         self.Ez_update_coeff = np.ones_like(self.Ez)
         self.Hx_update_coeff = np.ones_like(self.Hx)
         self.Hy_update_coeff = np.ones_like(self.Hy)
+        self.CaEz = np.ones_like(self.Ez)
+        self.CbEz = np.ones_like(self.Ez)
+        self.CaHx = np.ones_like(self.Hx)
+        self.CbHx = np.ones_like(self.Hx)
+        self.CaHy = np.ones_like(self.Hy)
+        self.CbHy = np.ones_like(self.Hy)
 
         # PML coefficients
         self.pml_width = None
@@ -228,6 +246,56 @@ class FDTD_2D_Ez:
         self.ERzz_Ez = self._to_vertices(self.ERzz)
         self.MRxx_Hx = self._to_x_faces(self.MRxx)
         self.MRyy_Hy = self._to_y_faces(self.MRyy)
+        self.SIGEzz_Ez = self._to_vertices(self.SIGEzz)
+        self.SIGMxx_Hx = self._to_x_faces(self.SIGMxx)
+        self.SIGMyy_Hy = self._to_y_faces(self.SIGMyy)
+
+    def _ensure_material_state(self):
+        """Upgrade states saved before named lossy materials were introduced."""
+        for name in ("SIGEzz", "SIGMxx", "SIGMyy"):
+            if not hasattr(self, name):
+                setattr(self, name, np.zeros_like(self.ERzz))
+        if not hasattr(self, "materials"):
+            self.materials = {}
+            self.add_material("vacuum")
+            self.add_material("PEC", kind="PEC")
+            self.add_material("PMC", kind="PMC")
+        self._average_material_to_yee()
+
+    def add_material(self, name, epsilon_r=1.0, mu_r=1.0, sigma_e=0.0,
+                     sigma_m=0.0, kind="ordinary"):
+        material = Material(name, epsilon_r, mu_r, sigma_e, sigma_m, kind)
+        self.materials[material.name.lower()] = material
+        return material
+
+    def get_material(self, material):
+        if isinstance(material, Material):
+            return material
+        try:
+            return self.materials[str(material).lower()]
+        except KeyError as exc:
+            raise KeyError(f"Unknown material {material!r}; call add_material() first.") from exc
+
+    def _shape_material(self, ER, MR, material, sigma_e, sigma_m):
+        if material is not None:
+            if ER is not None or MR is not None or sigma_e is not None or sigma_m is not None:
+                raise ValueError("Use either material or direct ER/MR/sigma arguments, not both.")
+            defined = self.get_material(material)
+            special = defined.kind if defined.kind in {"PEC", "PMC"} else None
+            return (special, defined.epsilon_r[2], defined.mu_r[0], defined.mu_r[1],
+                    defined.sigma_e[2], defined.sigma_m[0], defined.sigma_m[1])
+        special = self._parse_special_material(ER, MR, None)
+        if special is not None:
+            return special, None, None, None, None, None, None
+        if ER is None or MR is None:
+            raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
+        er = as_triple(ER, "ER", positive=True)
+        mr = as_triple(MR, "MR", positive=True)
+        se = as_triple(0.0 if sigma_e is None else sigma_e,
+                       "sigma_e", nonnegative=True)
+        sm = as_triple(0.0 if sigma_m is None else sigma_m,
+                       "sigma_m", nonnegative=True)
+        return None, er[2], mr[0], mr[1], se[2], sm[0], sm[1]
 
     def config(self, backend="cpu"):
         """Select ``cpu`` (Cython) or ``gpu`` (Numba-CUDA), with Python fallback."""
@@ -338,21 +406,9 @@ class FDTD_2D_Ez:
 
     # ---------- geometry helpers ----------
     def add_rectangle(self, ER=None, MR=None, x_position=None, y_position=None,
-                      subpixel=None, material=None):
-        special = self._parse_special_material(ER, MR, material)
-        if special is None:
-            if ER is None or MR is None:
-                raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
-            if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
-                ERzz_obj = float(ER[2])
-            else:
-                ERzz_obj = float(ER)
-            if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
-                MRxx_obj = float(MR[0])
-                MRyy_obj = float(MR[1])
-            else:
-                MRxx_obj = float(MR)
-                MRyy_obj = float(MR)
+                      subpixel=None, material=None, sigma_e=None, sigma_m=None):
+        (special, ERzz_obj, MRxx_obj, MRyy_obj, SIGEzz_obj, SIGMxx_obj,
+         SIGMyy_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
 
         def edge_to_m(val, axis='x'):
             if isinstance(val, (int, np.integer)): return (val * (self.dx if axis == 'x' else self.dy))
@@ -407,11 +463,14 @@ class FDTD_2D_Ez:
                 self.ERzz[i, j] = (1.0 - f) * self.ERzz[i, j] + f * ERzz_obj
                 self.MRxx[i, j] = (1.0 - f) * self.MRxx[i, j] + f * MRxx_obj
                 self.MRyy[i, j] = (1.0 - f) * self.MRyy[i, j] + f * MRyy_obj
+                self.SIGEzz[i, j] = (1 - f) * self.SIGEzz[i, j] + f * SIGEzz_obj
+                self.SIGMxx[i, j] = (1 - f) * self.SIGMxx[i, j] + f * SIGMxx_obj
+                self.SIGMyy[i, j] = (1 - f) * self.SIGMyy[i, j] + f * SIGMyy_obj
 
         self._average_material_to_yee()
 
     def add_circle(self, ER=None, MR=None, center=None, radius=None, nsub=None,
-                   subpixel=None, material=None):
+                   subpixel=None, material=None, sigma_e=None, sigma_m=None):
         """
         Add a (possibly anisotropic) circular object with subpixel edge smoothing.
 
@@ -421,20 +480,8 @@ class FDTD_2D_Ez:
         radius: float, meters.
         nsub: supersamples per axis (nsub x nsub per cell) for area fraction.
         """
-        special = self._parse_special_material(ER, MR, material)
-        if special is None:
-            if ER is None or MR is None:
-                raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
-            if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3:
-                ERzz_obj = float(ER[2])
-            else:
-                ERzz_obj = float(ER)
-            if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
-                MRxx_obj = float(MR[0])
-                MRyy_obj = float(MR[1])
-            else:
-                MRxx_obj = float(MR)
-                MRyy_obj = float(MR)
+        (special, ERzz_obj, MRxx_obj, MRyy_obj, SIGEzz_obj, SIGMxx_obj,
+         SIGMyy_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
 
         # --- parse geometry ---
         if not (isinstance(center, (list, tuple)) and len(center) == 2):
@@ -522,21 +569,17 @@ class FDTD_2D_Ez:
                 self.ERzz[i, j] = (1.0 - f) * self.ERzz[i, j] + f * ERzz_obj
                 self.MRxx[i, j] = (1.0 - f) * self.MRxx[i, j] + f * MRxx_obj
                 self.MRyy[i, j] = (1.0 - f) * self.MRyy[i, j] + f * MRyy_obj
+                self.SIGEzz[i, j] = (1 - f) * self.SIGEzz[i, j] + f * SIGEzz_obj
+                self.SIGMxx[i, j] = (1 - f) * self.SIGMxx[i, j] + f * SIGMxx_obj
+                self.SIGMyy[i, j] = (1 - f) * self.SIGMyy[i, j] + f * SIGMyy_obj
 
         self._average_material_to_yee()
 
     def add_triangle(self, ER=None, MR=None, vertices=None, subpixel=None,
-                     material=None):
+                     material=None, sigma_e=None, sigma_m=None):
         """Add a triangular dielectric, magnetic material, PEC, or PMC region."""
-        special = self._parse_special_material(ER, MR, material)
-        if special is None:
-            if ER is None or MR is None:
-                raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
-            ERzz_obj = float(ER[2]) if isinstance(ER, (list, tuple, np.ndarray)) and len(ER) == 3 else float(ER)
-            if isinstance(MR, (list, tuple, np.ndarray)) and len(MR) == 3:
-                MRxx_obj, MRyy_obj = float(MR[0]), float(MR[1])
-            else:
-                MRxx_obj = MRyy_obj = float(MR)
+        (special, ERzz_obj, MRxx_obj, MRyy_obj, SIGEzz_obj, SIGMxx_obj,
+         SIGMyy_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
 
         if not (isinstance(vertices, (list, tuple, np.ndarray)) and len(vertices) == 3
                 and all(len(vertex) == 2 for vertex in vertices)):
@@ -592,6 +635,12 @@ class FDTD_2D_Ez:
                 self.ERzz[i, j] = (1.0 - fraction) * self.ERzz[i, j] + fraction * ERzz_obj
                 self.MRxx[i, j] = (1.0 - fraction) * self.MRxx[i, j] + fraction * MRxx_obj
                 self.MRyy[i, j] = (1.0 - fraction) * self.MRyy[i, j] + fraction * MRyy_obj
+                self.SIGEzz[i, j] = ((1 - fraction) * self.SIGEzz[i, j]
+                                     + fraction * SIGEzz_obj)
+                self.SIGMxx[i, j] = ((1 - fraction) * self.SIGMxx[i, j]
+                                     + fraction * SIGMxx_obj)
+                self.SIGMyy[i, j] = ((1 - fraction) * self.SIGMyy[i, j]
+                                     + fraction * SIGMyy_obj)
         self._average_material_to_yee()
 
     # ---------- PML ----------
@@ -690,6 +739,19 @@ class FDTD_2D_Ez:
         self.kappa_y_Hx = self._to_x_faces(self.kappa_y)
         self.kappa_x_Ez = self._to_vertices(self.kappa_x)
         self.kappa_y_Ez = self._to_vertices(self.kappa_y)
+
+        electric_ratio = self.SIGEzz_Ez * self.dt / (2 * self.eps0 * self.ERzz_Ez)
+        magnetic_x_ratio = self.SIGMxx_Hx * self.dt / (2 * self.mu0 * self.MRxx_Hx)
+        magnetic_y_ratio = self.SIGMyy_Hy * self.dt / (2 * self.mu0 * self.MRyy_Hy)
+        self.CaEz = self.Ez_update_coeff * (1 - electric_ratio) / (1 + electric_ratio)
+        self.CbEz = (self.Ez_update_coeff * self.M
+                     / (self.ERzz_Ez * (1 + electric_ratio)))
+        self.CaHx = self.Hx_update_coeff * (1 - magnetic_x_ratio) / (1 + magnetic_x_ratio)
+        self.CbHx = (self.Hx_update_coeff * self.M
+                     / (self.MRxx_Hx * (1 + magnetic_x_ratio)))
+        self.CaHy = self.Hy_update_coeff * (1 - magnetic_y_ratio) / (1 + magnetic_y_ratio)
+        self.CbHy = (self.Hy_update_coeff * self.M
+                     / (self.MRyy_Hy * (1 + magnetic_y_ratio)))
 
     # ---------- source helpers ----------
     def _g(self, s, t):
@@ -1394,10 +1456,12 @@ class FDTD_2D_Ez:
         self.Psi_By_x = self.b_By_x * self.Psi_By_x + self.c_By_x * self.d_Ez_x
 
     def update_B(self):
-        self.Bx -= self.Hx_update_coeff * self.M * (
+        self.Hx = self.CaHx * self.Hx - self.CbHx * (
                 self.d_Ez_y / self.kappa_y_Hx + self.Psi_Bx_y)
-        self.By += self.Hy_update_coeff * self.M * (
+        self.Hy = self.CaHy * self.Hy + self.CbHy * (
                 self.d_Ez_x / self.kappa_x_Hy + self.Psi_By_x)
+        self.Bx = self.MRxx_Hx * self.Hx
+        self.By = self.MRyy_Hy * self.Hy
 
     def update_H(self):
         self.Bx[self.PMC_Hx] = 0.0
@@ -1447,9 +1511,10 @@ class FDTD_2D_Ez:
         self.Psi_Dz_y = self.b_Dz_y * self.Psi_Dz_y + self.c_Dz_y * self.d_Hx_y
 
     def update_D(self):
-        self.Dz = self.Dz + self.Ez_update_coeff * self.M * (
+        self.Ez = self.CaEz * self.Ez + self.CbEz * (
                 self.d_Hy_x / self.kappa_x_Ez - self.d_Hx_y / self.kappa_y_Ez
                 + self.Psi_Dz_x - self.Psi_Dz_y)
+        self.Dz = self.ERzz_Ez * self.Ez
 
     def update_E(self):
         self.Dz[self.PEC_Ez] = 0.0
@@ -2745,6 +2810,7 @@ class FDTD_2D_Ez:
             raise TypeError("state must be a dict produced by state_dict() / save().")
         self.__dict__.clear()
         self.__dict__.update(state)
+        self._ensure_material_state()
         self._ensure_conductor_state()
         self._cython_kernel = _cython_kernel
         self._cuda_kernels = None
@@ -2795,6 +2861,7 @@ class FDTD_2D_Ez:
         if not isinstance(state, dict):
             raise TypeError("Pickle file does not contain a state dict.")
         sim.__dict__.update(state)
+        sim._ensure_material_state()
         sim._ensure_conductor_state()
         sim._cython_kernel = _cython_kernel
         sim._cuda_kernels = None

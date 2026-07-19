@@ -5,7 +5,7 @@ A compact, research-oriented FDTD (finite-difference time-domain) solver for Max
 - Solves 1D, 2D, and 3D electromagnetic wave propagation in the time domain.
 - 2D modes include TMz (`FDTD_2D_Ez`) and TEz (`FDTD_2D_Hz`).
 - CPML boundaries for low-reflection truncation.
-- Material modeling with rectangles, circles, and triangles, including anisotropy and subpixel smoothing.
+- Named material modeling with anisotropy, electric/magnetic loss, and subpixel-smoothed geometry.
 - Native PEC/PMC geometry masks with Yee-component update constraints.
 - Source options: point, line-soft, TF/SF, and waveguide eigenmode ports.
 - Monitors and analysis: line monitors, FFT-based power, and 2D NF2FF.
@@ -42,6 +42,8 @@ Its objects and boundaries accept native PEC/PMC constraints without replacing
 ER or MR with artificial large values:
 
 ```python
+sim.add_material("lossy_glass", epsilon_r=4.0, sigma_e=0.02)
+sim.add_object(material="lossy_glass", region=(2e-3, 4e-3))
 sim.add_object(material="PEC", region=(4e-3, 5e-3))
 sim.add_object(material="PMC", region=slice(200, 210))
 sim.set_boundary(left="PEC", right="PMC")
@@ -79,22 +81,35 @@ print(sim.backend)
 The same API works for `FDTD_2D_Hz`. Numba-CUDA is optional and PyTorch is not
 required.
 
-### 2D Geometry and Perfect Conductors
+### Named Materials, Loss, and 2D Geometry
 
-All 2D shape functions first rasterize onto material cells. Ordinary ER/MR
-regions use the solver's subpixel setting (16 samples per axis by default),
-then the cell properties are averaged to their exact Yee locations:
+Define materials before constructing geometry. `epsilon_r`, `mu_r`, `sigma_e`,
+and `sigma_m` may be scalars or diagonal `(x, y, z)` values. All 2D shape
+functions first rasterize them onto material cells, use the solver's subpixel
+setting (16 samples per axis by default), and then average each property onto
+its exact Yee location:
 
 ```python
-sim.add_rectangle(ER=4.0, MR=1.0,
+sim.add_material("lossy_slab", epsilon_r=4.0, mu_r=1.0,
+                 sigma_e=0.02, sigma_m=0.0)
+sim.add_material("lens", epsilon_r=2.5)
+sim.add_material("prism", epsilon_r=(3.0, 3.2, 3.5))
+
+sim.add_rectangle(material="lossy_slab",
                   x_position=(0.2e-3, 0.4e-3),
                   y_position=(0.2e-3, 0.8e-3))
-sim.add_circle(ER=2.5, MR=1.0, center=(0.7e-3, 0.5e-3), radius=0.1e-3)
-sim.add_triangle(ER=3.0, MR=1.0,
+sim.add_circle(material="lens", center=(0.7e-3, 0.5e-3), radius=0.1e-3)
+sim.add_triangle(material="prism",
                  vertices=((0.1e-3, 0.1e-3),
                            (0.4e-3, 0.1e-3),
                            (0.2e-3, 0.35e-3)))
 ```
+
+TMz consumes the z electric and x/y magnetic tensor entries; TEz consumes
+the x/y electric and z magnetic entries. The Yee updates use centered
+(trapezoidal) conductivity terms, including both electric and magnetic field
+decay. Direct `ER=`, `MR=`, `sigma_e=`, and `sigma_m=` shape arguments remain
+available for older scripts.
 
 Pass `material="PEC"` or `material="PMC"` to any of these functions for a
 perfect conductor. Conductor cells are selected by their centers, `subpixel`

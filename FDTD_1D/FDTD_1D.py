@@ -5,6 +5,8 @@ from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 from tqdm import tqdm
 
+from FDTD_common import Material
+
 try:
     from . import _cython_kernel_1d as _cython_kernel
 except (ImportError, ValueError):
@@ -40,8 +42,19 @@ class FDTD_1D:
         self.MR_Ey = np.ones(Nz + 1)
         self.ER_Hx = np.ones(Nz)
         self.MR_Hx = np.ones(Nz)
+        self.sigma_e = np.zeros(Nz)
+        self.sigma_m = np.zeros(Nz)
+        self.sigma_e_Ey = np.zeros(Nz + 1)
+        self.sigma_m_Hx = np.zeros(Nz)
+        self.CaEy = np.ones(Nz + 1)
+        self.CaHx = np.ones(Nz)
         self.mEy = np.ones(Nz + 1)
         self.mHx = np.ones(Nz)
+
+        self.materials = {}
+        self.add_material("vacuum")
+        self.add_material("PEC", kind="PEC")
+        self.add_material("PMC", kind="PMC")
 
         self.Ey = np.zeros(Nz + 1)
         self.Hx = np.zeros(Nz)
@@ -136,11 +149,37 @@ class FDTD_1D:
             self.MR_Ey[1:-1] = 0.5 * (self.MR[:-1] + self.MR[1:])
         self.ER_Hx[:] = self.ER
         self.MR_Hx[:] = self.MR
+        self.sigma_e_Ey[[0, -1]] = self.sigma_e[[0, -1]]
+        if self.Nz > 1:
+            self.sigma_e_Ey[1:-1] = 0.5 * (self.sigma_e[:-1] + self.sigma_e[1:])
+        self.sigma_m_Hx[:] = self.sigma_m
 
     def _init_mEy_mHx(self):
+        self._refresh_conductor_masks()
         self._average_material_to_yee()
-        self.mEy = self.Ey_update_coeff * self.c0 * self.dt / self.ER_Ey
-        self.mHx = self.Hx_update_coeff * self.c0 * self.dt / self.MR_Hx
+        electric_ratio = self.sigma_e_Ey * self.dt / (2 * self.eps0 * self.ER_Ey)
+        magnetic_ratio = self.sigma_m_Hx * self.dt / (2 * self.mu0 * self.MR_Hx)
+        self.CaEy = self.Ey_update_coeff * (1 - electric_ratio) / (1 + electric_ratio)
+        self.CaHx = self.Hx_update_coeff * (1 - magnetic_ratio) / (1 + magnetic_ratio)
+        self.mEy = (self.Ey_update_coeff * self.c0 * self.dt
+                    / (self.ER_Ey * (1 + electric_ratio)))
+        self.mHx = (self.Hx_update_coeff * self.c0 * self.dt
+                    / (self.MR_Hx * (1 + magnetic_ratio)))
+
+    def add_material(self, name, epsilon_r=1.0, mu_r=1.0, sigma_e=0.0,
+                     sigma_m=0.0, kind="ordinary"):
+        """Define a named material; 1D uses its Ey/Hx tensor components."""
+        material = Material(name, epsilon_r, mu_r, sigma_e, sigma_m, kind)
+        self.materials[material.name.lower()] = material
+        return material
+
+    def get_material(self, material):
+        if isinstance(material, Material):
+            return material
+        try:
+            return self.materials[str(material).lower()]
+        except KeyError as exc:
+            raise KeyError(f"Unknown material {material!r}; call add_material() first.") from exc
 
     @staticmethod
     def _parse_special_material(ER=None, MR=None, material=None):
@@ -175,24 +214,27 @@ class FDTD_1D:
         return all(array.dtype == np.float64 and array.flags.c_contiguous for array in arrays)
 
     def H_Update(self):
-        used = self._cython_kernel is not None and self._cython_compatible(self.Hx, self.Ey, self.mHx)
+        used = self._cython_kernel is not None and self._cython_compatible(self.Hx, self.Ey, self.CaHx, self.mHx)
         if used:
-            self._cython_kernel.update_h(self.Hx, self.Ey, self.mHx, self.dz)
+            self._cython_kernel.update_h(self.Hx, self.Ey, self.CaHx, self.mHx, self.dz)
         if not used:
             for nz in range(self.Nz):
-                self.Hx[nz] += self.mHx[nz] * (self.Ey[nz + 1] - self.Ey[nz]) / self.dz
+                self.Hx[nz] = (self.CaHx[nz] * self.Hx[nz]
+                               + self.mHx[nz] * (self.Ey[nz + 1] - self.Ey[nz]) / self.dz)
         self.Hx[self.PMC_Hx] = 0.0
 
     def E_Update(self):
-        used = self._cython_kernel is not None and self._cython_compatible(self.Ey, self.Hx, self.mEy)
+        used = self._cython_kernel is not None and self._cython_compatible(self.Ey, self.Hx, self.CaEy, self.mEy)
         if used:
-            self._cython_kernel.update_e(self.Ey, self.Hx, self.mEy, self.dz)
+            self._cython_kernel.update_e(self.Ey, self.Hx, self.CaEy, self.mEy, self.dz)
         if not used:
             for nz in range(1, self.Nz):
-                self.Ey[nz] += self.mEy[nz] * (self.Hx[nz] - self.Hx[nz - 1]) / self.dz
+                self.Ey[nz] = (self.CaEy[nz] * self.Ey[nz]
+                               + self.mEy[nz] * (self.Hx[nz] - self.Hx[nz - 1]) / self.dz)
 
         if not self.left_absorbing_boundary:
-            self.Ey[0] += self.mEy[0] * self.Hx[0] / self.dz
+            self.Ey[0] = (self.CaEy[0] * self.Ey[0]
+                          + self.mEy[0] * self.Hx[0] / self.dz)
         else:
             adjacent = self.Ey[1]
             S = self.c0 * self.dt / (self.dz * np.sqrt(self.ER[0] * self.MR[0]))
@@ -200,7 +242,8 @@ class FDTD_1D:
             self.ey_left_past = adjacent
 
         if not self.right_absorbing_boundary:
-            self.Ey[-1] -= self.mEy[-1] * self.Hx[-1] / self.dz
+            self.Ey[-1] = (self.CaEy[-1] * self.Ey[-1]
+                           - self.mEy[-1] * self.Hx[-1] / self.dz)
         else:
             adjacent = self.Ey[-2]
             S = self.c0 * self.dt / (self.dz * np.sqrt(self.ER[-1] * self.MR[-1]))
@@ -209,7 +252,8 @@ class FDTD_1D:
 
         self.Ey[self.PEC_Ey] = 0.0
 
-    def add_object(self, ER=None, MR=None, region=None, subpixel=None, material=None):
+    def add_object(self, ER=None, MR=None, region=None, subpixel=None, material=None,
+                   sigma_e=None, sigma_m=None):
         """
         Assign material to cells before it is averaged onto the Yee grid.
 
@@ -219,14 +263,32 @@ class FDTD_1D:
             Boundary cells are volume-averaged using ``subpixel`` midpoint
             samples (the solver default is 16).
         """
-        special = self._parse_special_material(ER, MR, material)
+        if (material is not None and not isinstance(material, str)
+                and not isinstance(material, Material)):
+            raise TypeError("material must be a name or Material object.")
+        legacy_special = self._parse_special_material(ER, MR, None)
+        if material is not None:
+            if ER is not None or MR is not None or sigma_e is not None or sigma_m is not None:
+                raise ValueError("Use either material or direct ER/MR/sigma arguments, not both.")
+            defined = self.get_material(material)
+            special = defined.kind if defined.kind in {"PEC", "PMC"} else None
+            ER = float(defined.epsilon_r[1])
+            MR = float(defined.mu_r[0])
+            sigma_e = float(defined.sigma_e[1])
+            sigma_m = float(defined.sigma_m[0])
+        else:
+            special = legacy_special
         if special is None:
             if ER is None or MR is None:
                 raise ValueError("ER and MR are required for a dielectric/magnetic object.")
             ER = float(ER)
             MR = float(MR)
+            sigma_e = 0.0 if sigma_e is None else float(sigma_e)
+            sigma_m = 0.0 if sigma_m is None else float(sigma_m)
             if ER <= 0 or MR <= 0:
                 raise ValueError("ER and MR must be positive.")
+            if sigma_e < 0 or sigma_m < 0:
+                raise ValueError("sigma_e and sigma_m must be non-negative.")
 
         if isinstance(region, slice):
             if special is not None:
@@ -237,6 +299,10 @@ class FDTD_1D:
             else:
                 self.ER[region] = ER
                 self.MR[region] = MR
+                self.sigma_e[region] = sigma_e
+                self.sigma_m[region] = sigma_m
+                self.PEC_cells[region] = False
+                self.PMC_cells[region] = False
         elif isinstance(region, (tuple, list)) and len(region) == 2:
             z0, z1 = float(region[0]), float(region[1])
             if z1 < z0:
@@ -259,11 +325,19 @@ class FDTD_1D:
                                 + fill[touched] * ER)
             self.MR[touched] = ((1.0 - fill[touched]) * self.MR[touched]
                                 + fill[touched] * MR)
+            self.sigma_e[touched] = ((1 - fill[touched]) * self.sigma_e[touched]
+                                     + fill[touched] * sigma_e)
+            self.sigma_m[touched] = ((1 - fill[touched]) * self.sigma_m[touched]
+                                     + fill[touched] * sigma_m)
+            self.PEC_cells[touched] = False
+            self.PMC_cells[touched] = False
         else:
             raise TypeError("region must be a slice or a (z_start, z_end) tuple in meters.")
 
         # Keep component material inspectable immediately after geometry edits.
+        self._refresh_conductor_masks()
         self._average_material_to_yee()
+
     def set_boundary(self, left: str = "absorbing", right: str = "absorbing"):
         left = str(left).lower()
         right = str(right).lower()

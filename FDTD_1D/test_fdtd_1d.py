@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from matplotlib import pyplot as plt
 
-from FDTD_1D.FDTD_1D import FDTD_1D
+from FDTD_1D import FDTD_1D, Material
 
 
 class TestYeeGrid(unittest.TestCase):
@@ -23,6 +23,32 @@ class TestYeeGrid(unittest.TestCase):
         np.testing.assert_allclose(sim.MR, [2.0, 1.0])
         np.testing.assert_allclose(sim.ER_Ey, [2.5, 1.75, 1.0])
         np.testing.assert_allclose(sim.MR_Hx, [2.0, 1.0])
+
+    def test_named_lossy_material_maps_tensor_components_and_decays_fields(self):
+        sim = FDTD_1D(z_range=4.0, Nz=4, f_max=1.0, Nt=2, dt=1e-12)
+        lossy = sim.add_material(
+            "lossy", epsilon_r=(2.0, 3.0, 4.0), mu_r=(5.0, 6.0, 7.0),
+            sigma_e=(0.1, 0.2, 0.3), sigma_m=(0.4, 0.5, 0.6))
+        self.assertIsInstance(lossy, Material)
+        sim.add_object(material="lossy", region=slice(0, 4))
+
+        # The 1D polarization is Ey/Hx, so it uses y-directed electric and
+        # x-directed magnetic entries from the diagonal material tensors.
+        np.testing.assert_allclose(sim.ER, 3.0)
+        np.testing.assert_allclose(sim.MR, 5.0)
+        np.testing.assert_allclose(sim.sigma_e, 0.2)
+        np.testing.assert_allclose(sim.sigma_m, 0.4)
+
+        sim._init_mEy_mHx()
+        sim.Ey.fill(2.0)
+        sim.Hx.fill(3.0)
+        sim.H_Update()
+        np.testing.assert_allclose(sim.Hx, 3.0 * sim.CaHx)
+
+        sim.Hx.fill(3.0)
+        sim.Ey.fill(2.0)
+        sim.E_Update()
+        np.testing.assert_allclose(sim.Ey[1:-1], 2.0 * sim.CaEy[1:-1])
 
     def test_python_update_loops_use_all_yee_differences(self):
         sim = FDTD_1D(z_range=3.0, Nz=3, f_max=1.0, Nt=2, dt=1.0)
@@ -93,6 +119,8 @@ class TestYeeGrid(unittest.TestCase):
             sim.Hx[:] = [0.1, -0.2, 0.3, -0.4]
             sim.mEy[:] = np.linspace(0.1, 0.5, 5)
             sim.mHx[:] = np.linspace(0.2, 0.8, 4)
+            sim.CaEy[:] = np.linspace(0.91, 0.95, 5)
+            sim.CaHx[:] = np.linspace(0.81, 0.84, 4)
             sim.H_Update()
             sim.E_Update()
 

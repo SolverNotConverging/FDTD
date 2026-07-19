@@ -4,11 +4,71 @@ import warnings
 import numpy as np
 from matplotlib import pyplot as plt
 
-from FDTD_2D_Ez import FDTD_2D_Ez
+from FDTD_2D_Ez import FDTD_2D_Ez, Material
 from FDTD_2D_Hz import FDTD_2D_Hz
 
 
 class TestYeeMaterials(unittest.TestCase):
+    def test_named_lossy_materials_map_to_tmz_and_tez_components(self):
+        definition = dict(
+            epsilon_r=(2.0, 3.0, 4.0), mu_r=(5.0, 6.0, 7.0),
+            sigma_e=(0.1, 0.2, 0.3), sigma_m=(0.4, 0.5, 0.6))
+
+        tm = FDTD_2D_Ez(2.0, 2.0, 2, 2, 1.0, 1, subpixel=1)
+        material = tm.add_material("lossy", **definition)
+        self.assertIsInstance(material, Material)
+        tm.add_rectangle(material="lossy", x_position=(0, 1), y_position=(0, 1))
+        self.assertEqual(tm.ERzz[0, 0], 4.0)
+        self.assertEqual(tm.MRxx[0, 0], 5.0)
+        self.assertEqual(tm.MRyy[0, 0], 6.0)
+        self.assertEqual(tm.SIGEzz[0, 0], 0.3)
+        self.assertEqual(tm.SIGMxx[0, 0], 0.4)
+        self.assertEqual(tm.SIGMyy[0, 0], 0.5)
+
+        te = FDTD_2D_Hz(2.0, 2.0, 2, 2, 1.0, 1, subpixel=1)
+        te.add_material("lossy", **definition)
+        te.add_rectangle(material="lossy", x_position=(0, 1), y_position=(0, 1))
+        self.assertEqual(te.ERxx[0, 0], 2.0)
+        self.assertEqual(te.ERyy[0, 0], 3.0)
+        self.assertEqual(te.MRzz[0, 0], 7.0)
+        self.assertEqual(te.SIGExx[0, 0], 0.1)
+        self.assertEqual(te.SIGEyy[0, 0], 0.2)
+        self.assertEqual(te.SIGMzz[0, 0], 0.6)
+
+    def test_loss_coefficients_decay_uniform_tmz_and_tez_fields(self):
+        for solver_class in (FDTD_2D_Ez, FDTD_2D_Hz):
+            sim = solver_class(2.0, 2.0, 2, 2, 1.0, 1,
+                               dt=1e-12, subpixel=1).config("python")
+            sim.add_material("lossy", epsilon_r=2.0, mu_r=3.0,
+                             sigma_e=0.25, sigma_m=0.5)
+            sim.add_rectangle(material="lossy", x_position=(0, 2), y_position=(0, 2))
+            sim._init_Coeff()
+
+            if solver_class is FDTD_2D_Ez:
+                sim.Ez.fill(2.0)
+                sim.Hx.fill(3.0)
+                sim.Hy.fill(4.0)
+                sim.update_B()
+                np.testing.assert_allclose(sim.Hx, 3.0 * sim.CaHx)
+                np.testing.assert_allclose(sim.Hy, 4.0 * sim.CaHy)
+                sim.Hx.fill(3.0)
+                sim.Hy.fill(4.0)
+                sim.Ez.fill(2.0)
+                sim.update_D()
+                np.testing.assert_allclose(sim.Ez, 2.0 * sim.CaEz)
+            else:
+                sim.Ex.fill(2.0)
+                sim.Ey.fill(3.0)
+                sim.Hz.fill(4.0)
+                sim.update_B()
+                np.testing.assert_allclose(sim.Hz, 4.0 * sim.CaHz)
+                sim.Hz.fill(4.0)
+                sim.Ex.fill(2.0)
+                sim.Ey.fill(3.0)
+                sim.update_D()
+                np.testing.assert_allclose(sim.Ex, 2.0 * sim.CaEx)
+                np.testing.assert_allclose(sim.Ey, 3.0 * sim.CaEy)
+
     def test_tm_shapes_and_subpixel_material(self):
         sim = FDTD_2D_Ez(2.0, 2.0, 2, 2, 1.0, 1, subpixel=16)
         sim.add_rectangle([1.0, 1.0, 4.0], [3.0, 5.0, 1.0],

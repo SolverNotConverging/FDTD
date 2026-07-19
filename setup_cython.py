@@ -23,7 +23,7 @@ extensions = [
 setup(
     name="fdtd-cython-kernels",
     version="0.3.0",
-    packages=["FDTD_1D", "FDTD_2D_Ez", "FDTD_2D_Hz", "FDTD_3D"],
+    packages=["FDTD_common", "FDTD_1D", "FDTD_2D_Ez", "FDTD_2D_Hz", "FDTD_3D"],
     ext_modules=cythonize(extensions, language_level=3,
                           build_dir=str(ROOT / "build" / "cython")),
 )
