@@ -70,13 +70,19 @@ python setup_cython.py build_ext --inplace
 ```
 
 The build requires Cython, NumPy, setuptools, and a supported C compiler.
-The 2D GPU backend additionally requires Numba and a working CUDA runtime.
+The 2D and 3D GPU backends additionally require Numba and a working CUDA
+runtime. Select them with `sim.config("gpu")`; if CUDA is unavailable, the
+solver warns and falls back to its Python/NumPy implementation.
 
 ## Run tests
 
 ```bash
-python -m unittest discover -v
+python -m unittest discover -s tests -v
 ```
+
+All unit and CUDA-simulator tests live under [`tests/`](tests/). The explicit
+start directory also works when the test package is invoked from tools that do
+not recursively discover packages by default.
 
 ## Examples
 
@@ -85,7 +91,13 @@ python FDTD_1D/FDTD_1D_example.py
 python FDTD_2D_Ez/Example_1_Simple_Source.py
 python FDTD_2D_Hz/Example_1_Simple_Source.py
 python FDTD_3D/Example_3D.py
+python FDTD_3D/Example_3D_GPU.py
 ```
+
+Both 3D examples default to a `100 × 100 × 100` grid. They share the same
+scattering model and post-processing so CPU and GPU output can be compared
+directly. Use `--steps`, `--record-stride`, `--output-dir`, `--animate`, and
+`--no-show` to control a run; `--cells` may increase, but not reduce, the grid.
 
 The `FDTD_2D_Ez_Legacy` directory is retained for reference. New work should
 use `FDTD_2D_Ez` or `FDTD_2D_Hz`.

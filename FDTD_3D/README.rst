@@ -4,8 +4,8 @@ FDTD 3D solver
 ``FDTD_3D`` is a full-vector Cartesian Yee solver with named anisotropic lossy
 materials, block/cylinder/sphere geometry, exact PEC/PMC masks, 3D CFS-CPML,
 soft point/line/plane sources, plane monitors, HDF5 persistence, power spectra,
-surface-equivalence NF2FF, 3D dB far-field plotting, tqdm progress, and a
-compiled whole-run Cython backend.
+surface-equivalence NF2FF, 3D dB far-field plotting, tqdm progress, a compiled
+whole-run Cython backend, and a device-resident Numba-CUDA backend.
 
 Import and construction
 -----------------------
@@ -163,8 +163,8 @@ Run and progress
        progress_desc="3D scattering",
    )
 
-The default tqdm progress display works with both backends. The compiled loop
-is advanced in coarse chunks while preserving source timing and monitor-stride
+The default tqdm progress display works with every backend. The Cython loop is
+advanced in coarse chunks while preserving source timing and monitor-stride
 alignment. ``record_stride`` reduces monitor storage, not the FDTD time step.
 
 ``reset_fields`` clears fields and time state. ``step`` advances one step for
@@ -244,7 +244,22 @@ Backends
 
 ``config("cpu")`` uses ``_cython_kernel_3d.run_fdtd`` when the extension is
 available. This compiled function advances the main update/source/monitor loop.
+``config("gpu")`` selects the Numba-CUDA runtime when a CUDA device is
+available. It keeps all six fields, all twelve CPML auxiliaries, update
+coefficients, precomputed soft-source samples, and packed plane-monitor output
+on the device throughout the time loop. There are no field or monitor-array
+transfers per time step; final mutable state and recorded monitor data are
+copied back once after synchronization. Increase ``record_stride`` when a
+large monitor history would consume too much device memory.
 ``config("python")`` selects the equivalent NumPy reference implementation.
+
+.. code-block:: python
+
+   sim.config("gpu")
+   sim.run(record_stride=4, progress=True)
+
+If Numba-CUDA or a CUDA device is unavailable, ``config("gpu")`` emits a
+warning and selects the NumPy fallback.
 
 Build the extension from the project root:
 
@@ -255,5 +270,20 @@ Build the extension from the project root:
 Complete example
 ----------------
 
-See ``Example_3D.py`` for material geometry, plane excitation, HDF5 recording,
-power calculation, NF2FF, animation, and plotting in one workflow.
+``Example_3D.py`` is the CPU/Cython case and ``Example_3D_GPU.py`` selects the
+device-resident CUDA backend. Both default to a ``100 x 100 x 100`` grid and
+use the same lossy-dielectric/PEC scatterer, external plane excitation, closed
+NF2FF box, HDF5 plane monitor, power calculation, and 3D dB far-field plot.
+The shared setup makes their saved output directly comparable.
+
+.. code-block:: console
+
+   python FDTD_3D/Example_3D.py --no-show
+   python FDTD_3D/Example_3D_GPU.py --no-show
+
+The examples reject grids smaller than 100 cells per axis. Use ``--steps`` and
+``--record-stride`` to balance spectral duration against monitor memory,
+``--output-dir`` to select a destination, and ``--animate`` to additionally
+write the recorded field as a GIF. The default stride is eight, reducing the
+million-cell examples' plane-monitor footprint while retaining sufficient
+sampling bandwidth for their 6--10 GHz excitation.

@@ -178,8 +178,17 @@ Backends
 --------
 
 ``config("cpu")`` uses the optional Cython curl kernel. ``config("gpu")`` uses
-Numba-CUDA when available, and ``config("python")`` selects the reference
-loops. The same constitutive and loss coefficients are used with every backend.
+a persistent Numba-CUDA runtime when available, and ``config("python")``
+selects the reference loops. The GPU path transfers fields, coefficients,
+CFS-CPML arrays, masks, and sparse source descriptions once before the run.
+All time-step updates, source injection, monitor sampling, and optional history
+recording then remain on-device, followed by one final output synchronization.
+No host-device copy occurs inside the time loop.
+
+Use ``is_include_history=False`` with line monitors when GPU memory is limited.
+If full histories are requested, they remain on the device until completion;
+``record_stride`` controls their size. ``_gpu_transfer_stats`` provides a
+post-run diagnostic for source/monitor counts and per-step transfers.
 
 Examples
 --------

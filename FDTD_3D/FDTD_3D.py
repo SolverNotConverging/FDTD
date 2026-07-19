@@ -2,8 +2,8 @@
 
 The solver uses the conventional Cartesian Yee lattice.  Material geometry is
 rasterized on ``(Nx, Ny, Nz)`` voxels and averaged to the staggered field
-locations.  The optional Cython extension advances the complete time loop;
-the NumPy implementation is deliberately kept equivalent as a portable
+locations.  Optional Cython and Numba-CUDA backends advance the complete time
+loop; the NumPy implementation is deliberately kept equivalent as a portable
 fallback and reference implementation.
 """
 
@@ -12,6 +12,11 @@ import warnings
 
 import numpy as np
 from FDTD_common import Material, as_triple
+
+try:
+    from numba import cuda as _numba_cuda
+except ImportError:
+    _numba_cuda = None
 
 try:
     from . import _cython_kernel_3d as _cython_kernel
@@ -111,14 +116,27 @@ class FDTD_3D:
 
     # ------------------------------------------------------------------ materials
     def config(self, backend="cpu"):
-        """Select ``cpu`` (compiled when available) or ``python``."""
-        key = str(backend).lower()
-        if key not in {"cpu", "python", "cython"}:
-            raise ValueError("backend must be 'cpu', 'cython', or 'python'.")
+        """Select CPU, Cython, Python, or device-resident Numba-CUDA."""
+        key = str(backend).lower().replace("-", "_")
+        if key not in {"cpu", "python", "cython", "gpu", "numba_cuda"}:
+            raise ValueError("backend must be 'cpu', 'cython', 'gpu', or 'python'.")
         if key == "cython" and _cython_kernel is None:
             raise RuntimeError("The 3D Cython extension is not built. Run setup_cython.py build_ext --inplace.")
         self.backend_requested = key
-        self.backend = "cython" if key in {"cpu", "cython"} and _cython_kernel is not None else "python"
+        if key in {"gpu", "numba_cuda"}:
+            available = _numba_cuda is not None
+            if available:
+                try:
+                    available = bool(_numba_cuda.is_available())
+                except Exception:
+                    available = False
+            if available:
+                self.backend = "numba_cuda"
+            else:
+                self.backend = "python"
+                warnings.warn("Numba-CUDA is unavailable; using the NumPy fallback.", RuntimeWarning)
+        else:
+            self.backend = "cython" if key in {"cpu", "cython"} and _cython_kernel is not None else "python"
         if key == "cpu" and _cython_kernel is None:
             warnings.warn("3D Cython extension unavailable; using the NumPy fallback.", RuntimeWarning)
         return self
@@ -644,6 +662,9 @@ class FDTD_3D:
         steps = self.Nt if steps is None else int(steps)
         stride = int(record_stride)
         if steps < 1 or stride < 1: raise ValueError("steps and record_stride must be positive.")
+        if self.backend == "numba_cuda":
+            from FDTD_common.cuda_3d import run_gpu
+            return run_gpu(self, steps, stride, progress, progress_desc)
         source_data = self._compile_sources(steps)
         monitor_coords, history, record_steps = self._compile_monitors(steps, stride)
         if progress:

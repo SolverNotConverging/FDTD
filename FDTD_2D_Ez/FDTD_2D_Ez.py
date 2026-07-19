@@ -1524,6 +1524,11 @@ class FDTD_2D_Ez:
     # ---------- main loop ----------
 
     def run(self, record_stride=1, is_include_history=True):
+        if self.backend == "numba_cuda":
+            from FDTD_common.cuda_2d import run_tm
+            run_tm(self, record_stride=record_stride,
+                   is_include_history=is_include_history)
+            return
         self._init_Coeff()
         self.is_include_history = is_include_history
         Nx, Ny = self.Nx, self.Ny
@@ -2799,6 +2804,7 @@ class FDTD_2D_Ez:
         state = dict(self.__dict__)
         state.pop("_cython_kernel", None)
         state.pop("_cuda_kernels", None)
+        state.pop("_gpu_state", None)
         return state
 
     def load_state_dict(self, state: dict):

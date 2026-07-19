@@ -31,7 +31,7 @@ The source tree can be imported directly from the project root. Core runtime
 dependencies are NumPy, Matplotlib, SciPy, and tqdm. Additional features use:
 
 - Cython and a C compiler for optional compiled kernels;
-- Numba plus CUDA for the optional 2D GPU curl backend;
+- Numba plus CUDA for the optional device-resident 2D and 3D GPU backends;
 - h5py for 3D plane-monitor persistence;
 - Pillow or FFmpeg for exported animations.
 
@@ -149,14 +149,29 @@ remain several cells inside the PML interface.
 
 - 1D: compiled Cython field updates when available, otherwise Python loops.
 - 2D: `config("cpu")` selects Cython curl kernels when built;
-  `config("gpu")` selects Numba-CUDA when available; `config("python")` forces
-  the reference implementation. Material-loss updates remain equivalent on
-  every backend.
+  `config("gpu")` selects the persistent Numba-CUDA runtime when available;
+  `config("python")` forces the reference implementation. The GPU runtime
+  uploads fields, coefficients, CPML state, masks, and sparse source metadata
+  once before the run. Curl, CPML, lossy updates, conductor enforcement,
+  sources, monitor sampling, and optional history recording then remain on the
+  device for the complete time loop. Final fields and requested output buffers
+  are copied back after the run, with no host-device transfers per time step.
 - 3D: `config("cpu")` selects the compiled whole-run Cython loop when built;
-  `config("python")` uses the NumPy reference implementation.
+  `config("gpu")` selects a persistent Numba-CUDA loop, and `config("python")`
+  uses the NumPy reference implementation. The GPU path uploads the six Yee
+  fields, twelve CPML auxiliaries, material coefficients, packed soft-source
+  data, and monitor coordinates once per run. It performs no host/device array
+  transfers during time stepping, then copies the final mutable state and the
+  packed monitor history back once.
 
 Rebuild compiled extensions after changing a `.pyx` file, changing Python or
 NumPy versions, or moving to another platform.
+
+For large 2D GPU simulations, prefer line monitors with
+`is_include_history=False`. Full-field histories are intentionally accumulated
+on the GPU and copied back once. In 3D, only requested plane-monitor samples
+are accumulated; they must still fit in device memory. A larger
+`record_stride` reduces either allocation.
 
 ## Common workflow
 
@@ -175,10 +190,11 @@ NumPy versions, or moving to another platform.
 Run the repository tests from the project root:
 
 ```bash
-python -m unittest discover -v
+python -m unittest discover -s tests -v
 ```
 
-The suite checks Yee shapes and averaging, lossy decay, PEC/PMC masks,
+Every test module is collected under the top-level `tests/` package. The suite
+checks Yee shapes and averaging, lossy decay, PEC/PMC masks,
 accelerated-backend equivalence, CPML behavior, monitor persistence, power, and
 NF2FF output structure.
 

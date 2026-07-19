@@ -9,7 +9,7 @@ sim = FDTD_2D_Hz(
     Ny=120,
     f_min=50e9,
     f_max=90e9,
-    Nt=2000,
+    Nt=4000,
 )
 sim.config(backend='gpu')
 print(f"Requested GPU; selected backend: {sim.backend}")
