@@ -222,6 +222,20 @@ class TestBackends(unittest.TestCase):
             self.skipTest("Numba-CUDA is unavailable")
 
 
+class TestPML(unittest.TestCase):
+    def test_sigma_max_uses_standard_natural_log_formula(self):
+        order = 3
+        width = 2
+        reflection = 1e-8
+        for solver_class in (FDTD_2D_Ez, FDTD_2D_Hz):
+            sim = solver_class(1.0, 1.0, 10, 10, 1.0, 1)
+            sim.add_PML(width, order=order, R0=reflection)
+            thickness = width * min(sim.dx, sim.dy)
+            expected = (-(order + 1) * np.log(reflection)
+                        / (2 * sim.eta0 * thickness))
+            self.assertAlmostEqual(sim.sigma_max, expected)
+
+
 class TestSources(unittest.TestCase):
     def test_tm_tfsf_has_low_corner_leakage(self):
         sim = FDTD_2D_Ez(0.05, 0.05, 50, 50, 10e9, 140).config("python")

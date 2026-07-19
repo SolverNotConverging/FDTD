@@ -5,7 +5,6 @@ import numpy as np
 
 from FDTD_3D import FDTD_3D
 
-
 sim = FDTD_3D(
     x_range=100e-3, y_range=100e-3, z_range=100e-3,
     Nx=100, Ny=100, Nz=100,
@@ -44,7 +43,7 @@ sim.plot_power_spectrum(power, db=True)
 far_field = sim.NF2FF(
     nf_box, freqs=[8e9], theta=np.linspace(0, np.pi, 91),
     phi=np.linspace(0, 2 * np.pi, 181, endpoint=False),
-    source_index=0, window="hann",
+    source_index=0, window=None,
 )
 sim.plot_nf2ff(far_field, db=True, db_floor=-40)
 

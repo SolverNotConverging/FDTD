@@ -666,8 +666,8 @@ class FDTD_2D_Ez:
         L = min(Lx, Ly)
 
         if sigma_max is None:
-            # slide-11: sigma_max = -(n+1) * log10(R0) / (2 * eta0 * L)
-            self.sigma_max = -(self.pml_order + 1) * np.log10(R0) / (2 * self.eta0 * L)
+            self.sigma_max = (-(self.pml_order + 1) * np.log(R0)
+                              / (2 * self.eta0 * L))
         else:
             self.sigma_max = float(sigma_max)
 
