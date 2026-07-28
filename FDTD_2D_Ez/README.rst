@@ -121,9 +121,32 @@ Examples:
        "sftf", x=(25, 115), y=(25, 115),
        angle=0.35, is_show=False,
    )
+   sim.add_source(
+       "waveguide-x", x=20, y=(20, 80),
+       broadband=True,
+       frequency_mode_pairs=[
+           (60e9, 0),
+           (70e9, 0),
+           (80e9, 1),
+           (90e9, 1),
+       ],
+       modes_to_show=3,
+       is_show=True,
+   )
 
 The TF/SF source requires square cells. Waveguide sources solve a reduced
 staggered FDFD eigenproblem using the local material and conductor masks.
+For ``broadband=True``, the supplied frequency/index pairs are modal anchors.
+The paired index explicitly selects the mode at each anchor. Selected anchor
+fields are phase-aligned, then the electric field, magnetic field, and
+propagation constant are linearly interpolated onto every real-FFT bin inside
+the anchor interval. The dense source spectrum weights those interpolated
+fields before inverse-FFT synthesis. The magnetic spectrum includes both the
+half-time step and frequency-dependent half-cell propagation phase. At least
+two unique positive frequencies are required, and a selected mode with
+non-positive ``n_eff`` is rejected as cut off. The mode preview uses frequency
+rows and mode-index columns. Mode indices are used exactly as supplied; this
+path does not perform automatic cross-frequency mode selection or tracking.
 
 Line monitors and power
 -----------------------
@@ -199,5 +222,5 @@ monitor points and confirms that per-step transfer counts are zero.
 Examples
 --------
 
-This directory contains simple-source, TF/SF, waveguide, far-field, flux, and
-GPU examples.
+This directory contains simple-source, TF/SF, single-frequency and broadband
+waveguide, far-field, flux, and GPU examples.

@@ -86,6 +86,41 @@ class TestDeviceResidentCuda(unittest.TestCase):
                         getattr(gpu, name), getattr(python, name),
                         rtol=1e-12, atol=1e-13)
                 assert gpu._gpu_transfer_stats["source_events"] > 0
+
+            # Precomputed broadband modal tables remain device resident.
+            for solver_class, fields in configurations:
+                options = dict(
+                    x_range=8e-3, y_range=8e-3, Nx=8, Ny=8,
+                    f_min=20e9, f_max=100e9, Nt=8, dt=2e-12, subpixel=1,
+                )
+                python = solver_class(**options).config("python")
+                gpu = solver_class(**options).config("gpu")
+                for simulation in (python, gpu):
+                    def fake_modes(lo, hi, line, frequency, num_modes, guess, amplitude):
+                        length = hi - lo
+                        first = np.stack([
+                            np.full(length, mode + 1.0)
+                            for mode in range(num_modes)
+                        ])
+                        return first, -0.5 * first, 1.5 + 0.1 * np.arange(num_modes)
+
+                    simulation._wg_modes_x = fake_modes
+                    simulation.add_source(
+                        "waveguide-x", x=3, y=(2, 6), broadband=True,
+                        frequency_mode_pairs=[
+                            (30e9, 0), (55e9, 1), (90e9, 0),
+                        ],
+                        modes_to_show=2, t0=3e-12, tw=2e-12, is_show=False,
+                    )
+                    simulation.run(is_include_history=False)
+
+                for name in fields:
+                    np.testing.assert_allclose(
+                        getattr(gpu, name), getattr(python, name),
+                        rtol=1e-12, atol=1e-13)
+                assert gpu._gpu_transfer_stats["source_events"] > 0
+                assert gpu._gpu_transfer_stats["host_to_device_during_steps"] == 0
+                assert gpu._gpu_transfer_stats["device_to_host_during_steps"] == 0
         """)
         environment = os.environ.copy()
         environment["NUMBA_ENABLE_CUDASIM"] = "1"

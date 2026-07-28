@@ -59,6 +59,19 @@ def _inject_events(first, second, targets, ii, jj, source_ids, factors,
 
 
 @cuda.jit
+def _inject_table_events(first, second, targets, ii, jj, values, count, step):
+    event = cuda.grid(1)
+    if event >= count:
+        return
+    index = (ii[event], jj[event])
+    value = values[event, step]
+    if targets[event] == 0:
+        cuda.atomic.add(first, index, value)
+    else:
+        cuda.atomic.add(second, index, value)
+
+
+@cuda.jit
 def _tm_curl_e(ez, d_ez_y, d_ez_x, dx, dy):
     i, j = cuda.grid(2)
     if i < d_ez_y.shape[0] and j < d_ez_y.shape[1]:
@@ -332,6 +345,32 @@ class _Events:
         return len(self.target)
 
 
+class _TableEvents:
+    def __init__(self, steps):
+        self.steps = int(steps)
+        self.target = []
+        self.i = []
+        self.j = []
+        self.values = []
+
+    def add(self, target, i, j, values, shape):
+        i, j = int(i), int(j)
+        if not (0 <= i < shape[int(target)][0] and 0 <= j < shape[int(target)][1]):
+            return
+        values = np.asarray(values, dtype=float)
+        if values.shape != (self.steps,):
+            raise ValueError(
+                f"Broadband source event must contain {self.steps} time samples.")
+        self.target.append(int(target))
+        self.i.append(i)
+        self.j.append(j)
+        self.values.append(values.copy())
+
+    @property
+    def count(self):
+        return len(self.target)
+
+
 def _source_parameters(sources):
     count = max(1, len(sources))
     modes = np.zeros(count, np.int8)
@@ -363,6 +402,8 @@ def _delay(source, name, offset):
 def _compile_tm_events(sim):
     electric = _Events()
     magnetic = _Events()
+    broadband_electric = _TableEvents(sim.Nt)
+    broadband_magnetic = _TableEvents(sim.Nt)
     soft = _Events()
     e_shapes = (sim.d_Ez_y.shape, sim.d_Ez_x.shape)
     h_shapes = (sim.d_Hx_y.shape, sim.d_Hy_x.shape)
@@ -392,20 +433,42 @@ def _compile_tm_events(sim):
                              sim.dt / 2 - _delay(source, "Hx_delay_yhi", offset), h_shapes)
         elif kind == "waveguide-y":
             lo, hi = sorted((ix0, ix1))
-            for i in range(lo, hi + 1):
-                electric.add(0, i, iy0 - 1, sid,
-                             -source["Ez_src"][i - lo] / sim.dy, 0.0, e_shapes)
-                magnetic.add(0, i, iy0, sid,
-                             source["Hx_src"][i - lo] / sim.dy,
-                             sim.dt / 2 + sim.dy * source["n_eff"] / (2 * sim.c0), h_shapes)
+            if source.get("broadband", False):
+                for offset, i in enumerate(range(lo, hi + 1)):
+                    broadband_electric.add(
+                        0, i, iy0 - 1,
+                        -source["broadband_electric_drive"][:, offset] / sim.dy,
+                        e_shapes)
+                    broadband_magnetic.add(
+                        0, i, iy0,
+                        source["broadband_magnetic_drive"][:, offset] / sim.dy,
+                        h_shapes)
+            else:
+                for i in range(lo, hi + 1):
+                    electric.add(0, i, iy0 - 1, sid,
+                                 -source["Ez_src"][i - lo] / sim.dy, 0.0, e_shapes)
+                    magnetic.add(0, i, iy0, sid,
+                                 source["Hx_src"][i - lo] / sim.dy,
+                                 sim.dt / 2 + sim.dy * source["n_eff"] / (2 * sim.c0), h_shapes)
         elif kind == "waveguide-x":
             lo, hi = sorted((iy0, iy1))
-            for j in range(lo, hi + 1):
-                electric.add(1, ix0 - 1, j, sid,
-                             -source["Ez_src"][j - lo] / sim.dx, 0.0, e_shapes)
-                magnetic.add(1, ix0, j, sid,
-                             -source["Hy_src"][j - lo] / sim.dx,
-                             sim.dt / 2 + sim.dx * source["n_eff"] / (2 * sim.c0), h_shapes)
+            if source.get("broadband", False):
+                for offset, j in enumerate(range(lo, hi + 1)):
+                    broadband_electric.add(
+                        1, ix0 - 1, j,
+                        -source["broadband_electric_drive"][:, offset] / sim.dx,
+                        e_shapes)
+                    broadband_magnetic.add(
+                        1, ix0, j,
+                        -source["broadband_magnetic_drive"][:, offset] / sim.dx,
+                        h_shapes)
+            else:
+                for j in range(lo, hi + 1):
+                    electric.add(1, ix0 - 1, j, sid,
+                                 -source["Ez_src"][j - lo] / sim.dx, 0.0, e_shapes)
+                    magnetic.add(1, ix0, j, sid,
+                                 -source["Hy_src"][j - lo] / sim.dx,
+                                 sim.dt / 2 + sim.dx * source["n_eff"] / (2 * sim.c0), h_shapes)
         elif kind == "point":
             soft.add(0, ix0, iy0, sid, 1.0, 0.0, soft_shapes)
         elif kind == "line-soft":
@@ -415,12 +478,14 @@ def _compile_tm_events(sim):
             else:
                 for j in range(min(iy0, iy1), max(iy0, iy1)):
                     soft.add(0, ix0, j, sid, 1.0, 0.0, soft_shapes)
-    return electric, magnetic, soft
+    return electric, magnetic, broadband_electric, broadband_magnetic, soft
 
 
 def _compile_te_events(sim):
     electric = _Events()
     magnetic = _Events()
+    broadband_electric = _TableEvents(sim.Nt)
+    broadband_magnetic = _TableEvents(sim.Nt)
     soft = _Events()
     e_shapes = (sim.d_Ex_y.shape, sim.d_Ey_x.shape)
     h_shapes = (sim.d_Hz_y.shape, sim.d_Hz_x.shape)
@@ -451,20 +516,42 @@ def _compile_te_events(sim):
                              sim.dt / 2 - _delay(source, "Hz_delay_yhi", offset), h_shapes)
         elif kind == "waveguide-y":
             lo, hi = sorted((ix0, ix1))
-            for i in range(lo, hi):
-                electric.add(0, i, iy0 - 1, sid,
-                             -source["Ex_src"][i - lo] / sim.dy, 0.0, e_shapes)
-                magnetic.add(0, i, iy0, sid,
-                             -source["Hz_src"][i - lo] / sim.dy,
-                             sim.dt / 2 + sim.dy * source["n_eff"] / (2 * sim.c0), h_shapes)
+            if source.get("broadband", False):
+                for offset, i in enumerate(range(lo, hi)):
+                    broadband_electric.add(
+                        0, i, iy0 - 1,
+                        -source["broadband_electric_drive"][:, offset] / sim.dy,
+                        e_shapes)
+                    broadband_magnetic.add(
+                        0, i, iy0,
+                        -source["broadband_magnetic_drive"][:, offset] / sim.dy,
+                        h_shapes)
+            else:
+                for i in range(lo, hi):
+                    electric.add(0, i, iy0 - 1, sid,
+                                 -source["Ex_src"][i - lo] / sim.dy, 0.0, e_shapes)
+                    magnetic.add(0, i, iy0, sid,
+                                 -source["Hz_src"][i - lo] / sim.dy,
+                                 sim.dt / 2 + sim.dy * source["n_eff"] / (2 * sim.c0), h_shapes)
         elif kind == "waveguide-x":
             lo, hi = sorted((iy0, iy1))
-            for j in range(lo, hi):
-                electric.add(1, ix0 - 1, j, sid,
-                             -source["Ey_src"][j - lo] / sim.dx, 0.0, e_shapes)
-                magnetic.add(1, ix0, j, sid,
-                             source["Hz_src"][j - lo] / sim.dx,
-                             sim.dt / 2 + sim.dx * source["n_eff"] / (2 * sim.c0), h_shapes)
+            if source.get("broadband", False):
+                for offset, j in enumerate(range(lo, hi)):
+                    broadband_electric.add(
+                        1, ix0 - 1, j,
+                        -source["broadband_electric_drive"][:, offset] / sim.dx,
+                        e_shapes)
+                    broadband_magnetic.add(
+                        1, ix0, j,
+                        source["broadband_magnetic_drive"][:, offset] / sim.dx,
+                        h_shapes)
+            else:
+                for j in range(lo, hi):
+                    electric.add(1, ix0 - 1, j, sid,
+                                 -source["Ey_src"][j - lo] / sim.dx, 0.0, e_shapes)
+                    magnetic.add(1, ix0, j, sid,
+                                 source["Hz_src"][j - lo] / sim.dx,
+                                 sim.dt / 2 + sim.dx * source["n_eff"] / (2 * sim.c0), h_shapes)
         elif kind == "point":
             soft.add(0, ix0, iy0, sid, 1.0, 0.0, soft_shapes)
         elif kind == "line-soft":
@@ -474,7 +561,7 @@ def _compile_te_events(sim):
             else:
                 for j in range(min(iy0, iy1), max(iy0, iy1)):
                     soft.add(0, ix0, j, sid, 1.0, 0.0, soft_shapes)
-    return electric, magnetic, soft
+    return electric, magnetic, broadband_electric, broadband_magnetic, soft
 
 
 def _to_device(array):
@@ -495,6 +582,27 @@ def _device_events(events):
         "source": padded(events.source, np.int32),
         "factor": padded(events.factor, np.float64),
         "shift": padded(events.shift, np.float64),
+        "count": events.count,
+    }
+
+
+def _device_table_events(events):
+    size = max(1, events.count)
+
+    def padded(values, dtype):
+        result = np.zeros(size, dtype=dtype)
+        if values:
+            result[:len(values)] = values
+        return _to_device(result)
+
+    table = np.zeros((size, events.steps), dtype=np.float64)
+    if events.values:
+        table[:events.count, :] = np.asarray(events.values, dtype=np.float64)
+    return {
+        "target": padded(events.target, np.int8),
+        "i": padded(events.i, np.int32),
+        "j": padded(events.j, np.int32),
+        "values": _to_device(table),
         "count": events.count,
     }
 
@@ -554,6 +662,15 @@ def _event_launch(events, first, second, step, dt, source_device):
         step, dt, *source_device)
 
 
+def _table_event_launch(events, first, second, step):
+    if events["count"] == 0:
+        return
+    blocks = (events["count"] + THREADS_1D - 1) // THREADS_1D
+    _inject_table_events[blocks, THREADS_1D](
+        first, second, events["target"], events["i"], events["j"],
+        events["values"], events["count"], step)
+
+
 def _source_device_arrays(sim):
     return tuple(_to_device(item) for item in _source_parameters(sim.sources))
 
@@ -601,8 +718,9 @@ def run_tm(sim, record_stride=1, is_include_history=True):
     state["Hx_previous"] = _to_device(sim.Hx)
     state["Hy_previous"] = _to_device(sim.Hy)
     source_device = _source_device_arrays(sim)
-    e_host, h_host, soft_host = _compile_tm_events(sim)
+    e_host, h_host, be_host, bh_host, soft_host = _compile_tm_events(sim)
     e_events, h_events, soft_events = map(_device_events, (e_host, h_host, soft_host))
+    be_events, bh_events = map(_device_table_events, (be_host, bh_host))
     monitors = _compile_monitors(sim)
     record_count = (sim.Nt + stride - 1) // stride if is_include_history else 0
     if is_include_history:
@@ -618,7 +736,8 @@ def run_tm(sim, record_stride=1, is_include_history=True):
     sim._gpu_transfer_stats = {
         "host_to_device_during_steps": 0,
         "device_to_host_during_steps": 0,
-        "source_events": e_host.count + h_host.count + soft_host.count,
+        "source_events": (
+            e_host.count + h_host.count + be_host.count + bh_host.count + soft_host.count),
         "monitor_points": monitors["point_count"],
     }
     blocks = _blocks_2d(sim)
@@ -630,6 +749,7 @@ def run_tm(sim, record_stride=1, is_include_history=True):
         _tm_curl_e[blocks, THREADS_2D](
             state["Ez"], state["d_Ez_y"], state["d_Ez_x"], sim.dx, sim.dy)
         _event_launch(e_events, state["d_Ez_y"], state["d_Ez_x"], step, sim.dt, source_device)
+        _table_event_launch(be_events, state["d_Ez_y"], state["d_Ez_x"], step)
         _tm_update_h[blocks, THREADS_2D](
             state["Hx"], state["Hy"], state["Bx"], state["By"],
             state["Hx_previous"], state["Hy_previous"], state["d_Ez_y"], state["d_Ez_x"],
@@ -641,6 +761,7 @@ def run_tm(sim, record_stride=1, is_include_history=True):
             state["Hx"], state["Hy"], state["d_Hx_y"], state["d_Hy_x"],
             sim.dx, sim.dy, periodic_x, periodic_y)
         _event_launch(h_events, state["d_Hx_y"], state["d_Hy_x"], step, sim.dt, source_device)
+        _table_event_launch(bh_events, state["d_Hx_y"], state["d_Hy_x"], step)
         _tm_update_e[blocks, THREADS_2D](
             state["Ez"], state["Dz"], state["d_Hx_y"], state["d_Hy_x"],
             state["Psi_Dz_x"], state["Psi_Dz_y"], state["b_Dz_x"], state["c_Dz_x"],
@@ -692,8 +813,9 @@ def run_te(sim, record_stride=1, is_include_history=True):
     state = {name: _to_device(getattr(sim, name)) for name in state_names}
     state["Hz_previous"] = _to_device(sim.Hz)
     source_device = _source_device_arrays(sim)
-    e_host, h_host, soft_host = _compile_te_events(sim)
+    e_host, h_host, be_host, bh_host, soft_host = _compile_te_events(sim)
     e_events, h_events, soft_events = map(_device_events, (e_host, h_host, soft_host))
+    be_events, bh_events = map(_device_table_events, (be_host, bh_host))
     monitors = _compile_monitors(sim)
     record_count = (sim.Nt + stride - 1) // stride if is_include_history else 0
     if is_include_history:
@@ -708,7 +830,8 @@ def run_te(sim, record_stride=1, is_include_history=True):
     sim._gpu_transfer_stats = {
         "host_to_device_during_steps": 0,
         "device_to_host_during_steps": 0,
-        "source_events": e_host.count + h_host.count + soft_host.count,
+        "source_events": (
+            e_host.count + h_host.count + be_host.count + bh_host.count + soft_host.count),
         "monitor_points": monitors["point_count"],
     }
     blocks = _blocks_2d(sim)
@@ -720,6 +843,7 @@ def run_te(sim, record_stride=1, is_include_history=True):
         _te_curl_e[blocks, THREADS_2D](
             state["Ex"], state["Ey"], state["d_Ex_y"], state["d_Ey_x"], sim.dx, sim.dy)
         _event_launch(e_events, state["d_Ex_y"], state["d_Ey_x"], step, sim.dt, source_device)
+        _table_event_launch(be_events, state["d_Ex_y"], state["d_Ey_x"], step)
         _te_update_h[blocks, THREADS_2D](
             state["Hz"], state["Bz"], state["Hz_previous"], state["d_Ex_y"], state["d_Ey_x"],
             state["Psi_Bz_x"], state["Psi_Bz_y"], state["b_Bz_x"], state["c_Bz_x"],
@@ -731,6 +855,7 @@ def run_te(sim, record_stride=1, is_include_history=True):
             state["Hz"], state["d_Hz_y"], state["d_Hz_x"], sim.dx, sim.dy,
             periodic_x, periodic_y)
         _event_launch(h_events, state["d_Hz_y"], state["d_Hz_x"], step, sim.dt, source_device)
+        _table_event_launch(bh_events, state["d_Hz_y"], state["d_Hz_x"], step)
         _te_update_e[blocks, THREADS_2D](
             state["Ex"], state["Ey"], state["Dx"], state["Dy"],
             state["d_Hz_y"], state["d_Hz_x"], state["Psi_Dx_y"], state["Psi_Dy_x"],

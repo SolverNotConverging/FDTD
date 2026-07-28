@@ -6,6 +6,7 @@ from matplotlib import pyplot as plt
 
 from FDTD_2D_Ez import FDTD_2D_Ez, Material
 from FDTD_2D_Hz import FDTD_2D_Hz
+from FDTD_common.broadband import align_modal_anchor_phases, plot_modal_grid
 
 
 class TestYeeMaterials(unittest.TestCase):
@@ -261,6 +262,191 @@ class TestSources(unittest.TestCase):
                            mode_index=0, is_show=False)
             self.assertTrue(np.isfinite(sim.sources[0]["n_eff"]))
             sim.run(is_include_history=False)
+
+    def test_user_sampled_broadband_modal_sources_run(self):
+        frequencies = np.asarray([30e9, 55e9, 90e9])
+        mode_indices = np.asarray([0, 1, 0])
+
+        for solver_class in (FDTD_2D_Ez, FDTD_2D_Hz):
+            sim = solver_class(
+                8e-3, 8e-3, 8, 8, 100e9, 64,
+                f_min=20e9, dt=1e-12, subpixel=1,
+            ).config("python")
+
+            def fake_modes(lo, hi, line, frequency, num_modes, guess, amplitude):
+                length = hi - lo
+                first = np.stack([
+                    np.full(length, (mode + 1) * frequency / frequencies[0])
+                    for mode in range(num_modes)
+                ])
+                second = -0.5 * first
+                n_effs = 1.5 + 0.1 * np.arange(num_modes)
+                return first, second, n_effs
+
+            sim._wg_modes_x = fake_modes
+            sim.add_source(
+                "waveguide-x", x=3, y=(2, 6),
+                broadband=True,
+                frequency_mode_pairs=list(zip(frequencies, mode_indices)),
+                modes_to_show=2, t0=20e-12, tw=6e-12, is_show=False,
+            )
+
+            source = sim.sources[0]
+            aperture = 5 if solver_class is FDTD_2D_Ez else 4
+            self.assertTrue(source["broadband"])
+            np.testing.assert_array_equal(source["broadband_frequencies"], frequencies)
+            np.testing.assert_array_equal(source["broadband_mode_indices"], mode_indices)
+            self.assertEqual(source["broadband_electric_drive"].shape, (sim.Nt, aperture))
+            self.assertEqual(source["broadband_magnetic_drive"].shape, (sim.Nt, aperture))
+            self.assertTrue(np.all(np.isfinite(source["broadband_electric_drive"])))
+            self.assertTrue(np.all(np.isfinite(source["broadband_magnetic_drive"])))
+            interpolated_frequencies = source["broadband_interpolated_frequencies"]
+            self.assertGreater(interpolated_frequencies.size, frequencies.size)
+            selected_base = np.asarray([1.0, 2.0 * 55.0 / 30.0, 3.0])
+            if solver_class is FDTD_2D_Ez:
+                expected_electric = selected_base
+                magnetic_ratio = -0.5
+            else:
+                expected_electric = -0.5 * selected_base
+                magnetic_ratio = -2.0
+            np.testing.assert_allclose(
+                source["broadband_electric_profiles"][:, 0], expected_electric)
+            np.testing.assert_allclose(
+                source["broadband_magnetic_profiles"],
+                magnetic_ratio * source["broadband_electric_profiles"],
+            )
+            expected_interpolated_electric = np.interp(
+                interpolated_frequencies, frequencies, expected_electric)
+            np.testing.assert_allclose(
+                source["broadband_interpolated_electric_profiles"][:, 0],
+                expected_interpolated_electric,
+            )
+            np.testing.assert_allclose(
+                source["broadband_interpolated_beta"],
+                np.interp(
+                    interpolated_frequencies,
+                    frequencies,
+                    2.0 * np.pi * frequencies
+                    * source["broadband_n_effs"] / sim.c0,
+                ),
+            )
+
+            omega = 2.0 * np.pi * frequencies
+            expected_phase = np.exp(
+                1j * (
+                    omega * sim.dt / 2.0
+                    + omega * source["broadband_n_effs"] * (sim.dx / 2.0) / sim.c0
+                )
+            )
+            np.testing.assert_allclose(source["broadband_magnetic_phase"], expected_phase)
+            reference = source["broadband_reference_drive"]
+            central_energy = np.sum(reference[10:31] ** 2)
+            late_energy = np.sum(reference[40:] ** 2)
+            self.assertGreater(central_energy, 5.0 * late_energy)
+
+            sim.run(is_include_history=False)
+            fields = (sim.Ez, sim.Hx, sim.Hy) if solver_class is FDTD_2D_Ez else (
+                sim.Ex, sim.Ey, sim.Hz)
+            self.assertTrue(all(np.all(np.isfinite(field)) for field in fields))
+
+            zeros = np.zeros((sim.Nt, 1))
+            monitor = {
+                "index": 99,
+                "orientation": "vertical",
+                "ix0": 1, "ix1": 1, "iy0": 1, "iy1": 2,
+                "it0": 0, "it1": sim.Nt,
+            }
+            if solver_class is FDTD_2D_Ez:
+                monitor.update(Ez=zeros, Hx=zeros, Hy=zeros)
+            else:
+                monitor.update(Hz=zeros, Ex=zeros, Ey=zeros)
+            sim.monitor_results = [monitor]
+            normalized = sim.power_spectrum(
+                99, interpolated_frequencies, source_index=0)
+            modal_flux = np.sum(
+                np.real(
+                    source["broadband_interpolated_electric_profiles"]
+                    * np.conj(source["broadband_interpolated_magnetic_profiles"])
+                ),
+                axis=1,
+            ) * sim.dy
+            expected_source_power = (
+                np.abs(normalized["source_spectrum"]) ** 2
+                * (0.5 / sim.eta0)
+                * np.abs(modal_flux)
+            )
+            np.testing.assert_allclose(
+                normalized["source_power"], expected_source_power)
+
+    def test_broadband_anchor_phase_alignment_removes_eigenvector_sign_flips(self):
+        electric = np.asarray([
+            [1.0, 2.0, 1.0],
+            [-1.1, -2.1, -0.9],
+            [1.2, 2.2, 0.8],
+        ])
+        magnetic = -0.5 * electric
+        aligned_electric, aligned_magnetic, factors = align_modal_anchor_phases(
+            electric, magnetic)
+
+        self.assertGreater(np.vdot(aligned_electric[0], aligned_electric[1]).real, 0.0)
+        self.assertGreater(np.vdot(aligned_electric[1], aligned_electric[2]).real, 0.0)
+        np.testing.assert_allclose(aligned_magnetic, -0.5 * aligned_electric)
+        np.testing.assert_allclose(factors, [1.0, -1.0, 1.0], atol=1e-14)
+
+    def test_broadband_modal_source_rejects_invalid_basis_and_cutoff(self):
+        sim = FDTD_2D_Ez(
+            8e-3, 8e-3, 8, 8, 100e9, 16,
+            f_min=20e9, dt=1e-12, subpixel=1,
+        )
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            sim.add_source(
+                "waveguide-x", x=3, y=(2, 6), broadband=True,
+                frequency_mode_pairs=[(50e9, 0)], is_show=False,
+            )
+        with self.assertRaisesRegex(ValueError, "must be an iterable"):
+            sim.add_source(
+                "waveguide-x", x=3, y=(2, 6), broadband=True,
+                frequency_mode_pairs=[(40e9, 0.5), (60e9, 1)], is_show=False,
+            )
+        with self.assertRaisesRegex(ValueError, "only for waveguide"):
+            sim.add_source(
+                "point", x=3, y=3, broadband=True,
+                frequency_mode_pairs=[(40e9, 0), (60e9, 0)], is_show=False,
+            )
+
+        def cutoff_modes(lo, hi, line, frequency, num_modes, guess, amplitude):
+            modes = np.ones((num_modes, hi - lo))
+            n_effs = np.ones(num_modes)
+            if frequency > 50e9:
+                n_effs[0] = 0.0
+            return modes, -modes, n_effs
+
+        sim._wg_modes_x = cutoff_modes
+        with self.assertRaisesRegex(ValueError, "cut off or non-propagating"):
+            sim.add_source(
+                "waveguide-x", x=3, y=(2, 6), broadband=True,
+                frequency_mode_pairs=[(40e9, 0), (60e9, 0)], is_show=False,
+            )
+
+    def test_broadband_modal_preview_uses_frequency_rows_and_mode_columns(self):
+        axis = np.linspace(0.0, 1.0, 4)
+        mode_rows = [
+            np.arange(12, dtype=float).reshape(3, 4),
+            np.arange(12, 24, dtype=float).reshape(3, 4),
+        ]
+        fig, axes = plot_modal_grid(
+            frequencies=[30e9, 60e9],
+            first_modes=mode_rows,
+            second_modes=[-row for row in mode_rows],
+            n_effs=[np.asarray([1.5, 1.4, 1.3]), np.asarray([1.6, 1.5, 1.4])],
+            axis=axis,
+            first_label="E",
+            second_label="H",
+            title="Broadband modes",
+        )
+        self.assertEqual(axes.shape, (2, 3))
+        self.assertLessEqual(fig.get_size_inches()[1], 4.0)
+        plt.close(fig)
 
 
 class TestMonitorIndicesAndPower(unittest.TestCase):

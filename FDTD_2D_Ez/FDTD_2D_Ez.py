@@ -4,6 +4,13 @@ from tqdm import tqdm
 import warnings
 
 from FDTD_common import Material, as_triple
+from FDTD_common.broadband import (
+    align_modal_anchor_phases,
+    interpolate_modal_anchors,
+    plot_modal_grid,
+    synthesize_modal_drives,
+    validate_frequency_mode_pairs,
+)
 
 try:
     from . import _cython_kernel_ez as _cython_kernel
@@ -1001,9 +1008,142 @@ class FDTD_2D_Ez:
 
         return np.asarray(Ez_modes), np.asarray(Hy_modes), np.asarray(n_eff, dtype=float)
 
+    def _prepare_broadband_waveguide_source(
+            self, source, kind, frequencies, mode_indices, modes_to_show,
+            eig_guess, is_show):
+        """Solve user-selected modal samples and synthesize Yee-time drives."""
+        mode_count = max(1, int(modes_to_show), int(np.max(mode_indices)) + 1)
+        all_electric, all_magnetic, all_n_effs = [], [], []
+
+        if kind == "waveguide-y":
+            lo, hi = sorted((source["ix0"], source["ix1"]))
+            line = source["iy0"]
+            axis = np.arange(lo, hi + 1) * self.dx
+            half_cell = self.dy / 2.0
+            magnetic_key = "Hx_src"
+            for frequency in frequencies:
+                electric, magnetic, n_effs = self._wg_modes_y(
+                    lo, hi, line, frequency, num_modes=mode_count,
+                    guess=eig_guess, amplitude=source["amplitude"])
+                electric = np.stack(
+                    [self._to_x_faces(mode[:, None])[:, 0] for mode in electric])
+                magnetic = np.stack(
+                    [self._to_x_faces(mode[:, None])[:, 0] for mode in magnetic])
+                iy_node = int(np.clip(line, 0, self.Ny))
+                iy_cell = int(np.clip(line, 0, self.Ny - 1))
+                electric[:, self.PEC_Ez[lo:hi + 1, iy_node]] = 0.0
+                magnetic[:, self.PMC_Hx[lo:hi + 1, iy_cell]] = 0.0
+                all_electric.append(electric)
+                all_magnetic.append(magnetic)
+                all_n_effs.append(n_effs)
+            plot_title = f"Broadband waveguide-y port at y={line}"
+            magnetic_label = "Hx"
+        else:
+            lo, hi = sorted((source["iy0"], source["iy1"]))
+            line = source["ix0"]
+            axis = np.arange(lo, hi + 1) * self.dy
+            half_cell = self.dx / 2.0
+            magnetic_key = "Hy_src"
+            for frequency in frequencies:
+                electric, magnetic, n_effs = self._wg_modes_x(
+                    lo, hi, line, frequency, num_modes=mode_count,
+                    guess=eig_guess, amplitude=source["amplitude"])
+                electric = np.stack(
+                    [self._to_y_faces(mode[None, :])[0, :] for mode in electric])
+                magnetic = np.stack(
+                    [self._to_y_faces(mode[None, :])[0, :] for mode in magnetic])
+                ix_node = int(np.clip(line, 0, self.Nx))
+                ix_cell = int(np.clip(line, 0, self.Nx - 1))
+                electric[:, self.PEC_Ez[ix_node, lo:hi + 1]] = 0.0
+                magnetic[:, self.PMC_Hy[ix_cell, lo:hi + 1]] = 0.0
+                all_electric.append(electric)
+                all_magnetic.append(magnetic)
+                all_n_effs.append(n_effs)
+            plot_title = f"Broadband waveguide-x port at x={line}"
+            magnetic_label = "Hy"
+
+        for row, (modes, index) in enumerate(zip(all_electric, mode_indices)):
+            if index >= modes.shape[0]:
+                raise ValueError(
+                    f"Mode index {index} is unavailable at {frequencies[row]:.6g} Hz; "
+                    f"the eigensolver returned {modes.shape[0]} modes.")
+
+        selected_electric = np.stack(
+            [modes[index] for modes, index in zip(all_electric, mode_indices)])
+        selected_magnetic = np.stack(
+            [modes[index] for modes, index in zip(all_magnetic, mode_indices)])
+        selected_n_effs = np.asarray(
+            [values[index] for values, index in zip(all_n_effs, mode_indices)],
+            dtype=float,
+        )
+        invalid = (~np.isfinite(selected_n_effs)) | (selected_n_effs <= 0.0)
+        if np.any(invalid):
+            bad = int(np.flatnonzero(invalid)[0])
+            raise ValueError(
+                f"Selected mode {mode_indices[bad]} is cut off or non-propagating "
+                f"at {frequencies[bad]:.6g} Hz (n_eff={selected_n_effs[bad]:.6g}).")
+
+        selected_electric, selected_magnetic, phase_factors = (
+            align_modal_anchor_phases(selected_electric, selected_magnetic))
+        time = np.arange(self.Nt, dtype=float) * self.dt
+        synthesis = synthesize_modal_drives(
+            time=time,
+            waveform=self._g(source, time),
+            frequencies=frequencies,
+            electric_profiles=selected_electric,
+            magnetic_profiles=selected_magnetic,
+            n_effs=selected_n_effs,
+            half_cell=half_cell,
+            c0=self.c0,
+        )
+        reference = int(np.argmax(np.abs(synthesis["anchor_source_spectrum"])))
+        source["broadband_frequencies"] = frequencies.copy()
+        source["broadband_mode_indices"] = mode_indices.copy()
+        source["broadband_n_effs"] = selected_n_effs
+        source["broadband_electric_profiles"] = selected_electric
+        source["broadband_magnetic_profiles"] = selected_magnetic
+        source["broadband_anchor_phase_factors"] = phase_factors
+        source["broadband_electric_drive"] = synthesis["electric"]
+        source["broadband_magnetic_drive"] = synthesis["magnetic"]
+        source["broadband_reference_drive"] = synthesis["reference"]
+        source["broadband_source_spectrum"] = synthesis["source_spectrum"]
+        source["broadband_anchor_source_spectrum"] = synthesis["anchor_source_spectrum"]
+        source["broadband_fft_frequencies"] = synthesis["fft_frequencies"]
+        source["broadband_active_frequency_mask"] = synthesis["active_frequency_mask"]
+        source["broadband_interpolated_frequencies"] = synthesis["interpolated_frequencies"]
+        source["broadband_interpolated_electric_profiles"] = (
+            synthesis["interpolated_electric_profiles"])
+        source["broadband_interpolated_magnetic_profiles"] = (
+            synthesis["interpolated_magnetic_profiles"])
+        source["broadband_interpolated_beta"] = synthesis["interpolated_beta"]
+        source["broadband_magnetic_phase"] = synthesis["magnetic_phase"]
+        source["broadband_fft_magnetic_phase"] = synthesis["fft_magnetic_phase"]
+        source["Ez_src"] = selected_electric[reference]
+        source[magnetic_key] = selected_magnetic[reference]
+        source["n_eff"] = float(selected_n_effs[reference])
+        self.avg_freqs[-1] = self._spec_centroid(synthesis["reference"])
+
+        if is_show:
+            preview_modes = sorted(
+                set(range(min(max(0, int(modes_to_show)), mode_count)))
+                | set(int(index) for index in mode_indices)
+            )
+            plot_modal_grid(
+                frequencies=frequencies,
+                first_modes=all_electric,
+                second_modes=all_magnetic,
+                n_effs=all_n_effs,
+                axis=axis,
+                first_label="Ez",
+                second_label=magnetic_label,
+                title=plot_title,
+                mode_indices=preview_modes,
+            )
+
     # ---------- public API: add_source ----------
     def add_source(self, kind, x, y, amplitude=1.0, t0=None, tw=None, f_min=None, f_max=None,
-                   mode_index=0, modes_to_show=4, eig_guess=None, is_show=True, angle=None):
+                   mode_index=0, modes_to_show=4, eig_guess=None, is_show=True, angle=None,
+                   broadband=False, frequency_mode_pairs=None):
         """
         Add a source.
 
@@ -1020,6 +1160,11 @@ class FDTD_2D_Ez:
         For 'sftf':
           - x must be a span (x_lo, x_hi) and y must be a span (y_lo, y_hi).
           - angle is the propagation angle θ in radians measured from +x toward +y.
+
+        For a broadband waveguide source, set ``broadband=True`` and supply
+        ``frequency_mode_pairs=[(frequency, mode_index), ...]``. The selected
+        modes are phase-aligned and linearly interpolated from these anchors
+        onto the dense real-FFT frequency grid used for modal synthesis.
         """
 
         k = kind.lower()
@@ -1029,6 +1174,14 @@ class FDTD_2D_Ez:
         # normalize frequency parameters
         fmin = f_min if f_min is not None else self.f_min
         fmax = f_max if f_max is not None else self.f_max
+        broadband = bool(broadband)
+        if broadband and k not in ("waveguide-x", "waveguide-y"):
+            raise ValueError("broadband=True is supported only for waveguide modal sources.")
+        if not broadband and frequency_mode_pairs is not None:
+            raise ValueError("frequency_mode_pairs requires broadband=True.")
+        if broadband:
+            broadband_frequencies, broadband_mode_indices = validate_frequency_mode_pairs(
+                frequency_mode_pairs, f_min=fmin, f_max=fmax, dt=self.dt)
 
         # window params
         if fmin is None:
@@ -1073,6 +1226,7 @@ class FDTD_2D_Ez:
             amplitude=float(amplitude), t0=float(t0), tw=float(tw),
             f_min=(None if fmin is None else float(fmin)),
             f_max=float(fmax),
+            broadband=broadband,
         )
 
         # optional preview
@@ -1145,8 +1299,13 @@ class FDTD_2D_Ez:
             s['Ez_delay_yhi'] = Ez_delay_yhi
             s['Hx_delay_yhi'] = Hx_delay_yhi
 
+        if broadband:
+            self._prepare_broadband_waveguide_source(
+                s, k, broadband_frequencies, broadband_mode_indices,
+                modes_to_show, eig_guess, is_show)
+
         # --- waveguide port (horizontal, normal = y) ---
-        if k == 'waveguide-y':
+        elif k == 'waveguide-y':
             lo, hi = (min(ix0, ix1), max(ix0, ix1))
             iy_line = iy0
             # choose a reasonable center frequency
@@ -1650,18 +1809,28 @@ class FDTD_2D_Ez:
                     y = s["iy0"]
                     i0, i1 = s["ix0"], s["ix1"]
                     lo, hi = (min(i0, i1), max(i0, i1))
-                    E_src = self._g(s, t_index * self.dt)
-                    for i in range(lo, hi + 1):
+                    if s.get("broadband", False):
                         if 0 <= y - 1 < self.Ny:
-                            self.d_Ez_y[i, y - 1] -= (1.0 / self.dy) * E_src * s["Ez_src"][i - lo]
+                            self.d_Ez_y[lo:hi + 1, y - 1] -= (
+                                s["broadband_electric_drive"][t_index] / self.dy)
+                    else:
+                        E_src = self._g(s, t_index * self.dt)
+                        for i in range(lo, hi + 1):
+                            if 0 <= y - 1 < self.Ny:
+                                self.d_Ez_y[i, y - 1] -= (1.0 / self.dy) * E_src * s["Ez_src"][i - lo]
                 elif s['kind'] == 'waveguide-x':
                     x = s["ix0"]
                     j0, j1 = s["iy0"], s["iy1"]
                     lo, hi = (min(j0, j1), max(j0, j1))
-                    E_src = self._g(s, t_index * self.dt)
-                    for j in range(lo, hi + 1):
+                    if s.get("broadband", False):
                         if 0 <= x - 1 < self.Nx:
-                            self.d_Ez_x[x - 1, j] -= (1.0 / self.dx) * E_src * s["Ez_src"][j - lo]
+                            self.d_Ez_x[x - 1, lo:hi + 1] -= (
+                                s["broadband_electric_drive"][t_index] / self.dx)
+                    else:
+                        E_src = self._g(s, t_index * self.dt)
+                        for j in range(lo, hi + 1):
+                            if 0 <= x - 1 < self.Nx:
+                                self.d_Ez_x[x - 1, j] -= (1.0 / self.dx) * E_src * s["Ez_src"][j - lo]
 
             self.calcualte_Psi_B()
             self.update_B()
@@ -1726,24 +1895,34 @@ class FDTD_2D_Ez:
 
                 # H injection (waveguide-y)
                 elif s["kind"] == 'waveguide-y':
-                    n_eff = s["n_eff"]
-                    H_src = -self._g(s, t_index * self.dt + self.dy * n_eff / (2 * self.c0) + self.dt / 2.0)
                     y = s["iy0"]
                     i0, i1 = s["ix0"], s["ix1"]
                     lo, hi = (min(i0, i1), max(i0, i1))
-                    for i in range(lo, hi + 1):
+                    if s.get("broadband", False):
                         if 0 <= y < self.Ny:
-                            self.d_Hx_y[i, y] -= (1.0 / self.dy) * H_src * s["Hx_src"][i - lo]
+                            self.d_Hx_y[lo:hi + 1, y] += (
+                                s["broadband_magnetic_drive"][t_index] / self.dy)
+                    else:
+                        n_eff = s["n_eff"]
+                        H_src = -self._g(s, t_index * self.dt + self.dy * n_eff / (2 * self.c0) + self.dt / 2.0)
+                        for i in range(lo, hi + 1):
+                            if 0 <= y < self.Ny:
+                                self.d_Hx_y[i, y] -= (1.0 / self.dy) * H_src * s["Hx_src"][i - lo]
 
                 elif s["kind"] == 'waveguide-x':
-                    n_eff = s["n_eff"]
-                    H_src = -self._g(s, t_index * self.dt + self.dx * n_eff / (2 * self.c0) + self.dt / 2.0)
                     x = s["ix0"]
                     j0, j1 = s["iy0"], s["iy1"]
                     lo, hi = (min(j0, j1), max(j0, j1))
-                    for j in range(lo, hi + 1):
+                    if s.get("broadband", False):
                         if 0 <= x < self.Nx:
-                            self.d_Hy_x[x, j] += (1.0 / self.dx) * H_src * s["Hy_src"][j - lo]
+                            self.d_Hy_x[x, lo:hi + 1] -= (
+                                s["broadband_magnetic_drive"][t_index] / self.dx)
+                    else:
+                        n_eff = s["n_eff"]
+                        H_src = -self._g(s, t_index * self.dt + self.dx * n_eff / (2 * self.c0) + self.dt / 2.0)
+                        for j in range(lo, hi + 1):
+                            if 0 <= x < self.Nx:
+                                self.d_Hy_x[x, j] += (1.0 / self.dx) * H_src * s["Hy_src"][j - lo]
 
             self.calcualte_Psi_D()
             self.update_D()
@@ -2064,7 +2243,10 @@ class FDTD_2D_Ez:
 
         s = self.sources[int(source_index)]
         t = np.arange(0, self.Nt * self.dt, self.dt)
-        g = np.asarray(self._g(s, t), dtype=float)
+        if s.get("broadband", False):
+            g = np.asarray(s["broadband_reference_drive"], dtype=float)
+        else:
+            g = np.asarray(self._g(s, t), dtype=float)
         Nt = g.shape[0]
         if Nt < 2:
             raise ValueError("Need at least 2 time samples for FFT power calculation.")
@@ -2262,9 +2444,39 @@ class FDTD_2D_Ez:
             raise IndexError(f"source_index {source_index} out of range for {len(self.sources)} sources.")
         source = self.sources[source_index]
         source_time = np.arange(self.Nt) * self.dt
-        source_waveform = np.asarray(self._g(source, source_time), dtype=float)
+        if source.get("broadband", False):
+            source_waveform = np.asarray(
+                source["broadband_reference_drive"], dtype=float)
+        else:
+            source_waveform = np.asarray(self._g(source, source_time), dtype=float)
         source_spectrum = _dft(source_waveform[:, None], source_time).ravel()
-        source_power = np.abs(source_spectrum) ** 2 * self._source_geometry_factor(source)
+        if source.get("broadband", False) and source["kind"].startswith("waveguide-"):
+            anchor_frequencies = np.asarray(
+                source["broadband_frequencies"], dtype=float)
+            inside = (
+                (requested >= anchor_frequencies[0])
+                & (requested <= anchor_frequencies[-1])
+            )
+            geometry_factor = np.zeros_like(requested)
+            if np.any(inside):
+                electric = interpolate_modal_anchors(
+                    anchor_frequencies,
+                    source["broadband_electric_profiles"],
+                    requested[inside],
+                )
+                magnetic = interpolate_modal_anchors(
+                    anchor_frequencies,
+                    source["broadband_magnetic_profiles"],
+                    requested[inside],
+                )
+                spacing = self.dx if source["kind"] == "waveguide-y" else self.dy
+                modal_flux = np.sum(
+                    np.real(electric * np.conj(magnetic)), axis=1) * spacing
+                geometry_factor[inside] = (
+                    0.5 / self.eta0) * np.abs(modal_flux)
+        else:
+            geometry_factor = self._source_geometry_factor(source)
+        source_power = np.abs(source_spectrum) ** 2 * geometry_factor
         threshold = 1e-12 * max(float(np.max(source_power)), 1e-30)
         valid_source = source_power >= threshold
         raw_complex_power = np.sum(raw_density, axis=1) * dL
