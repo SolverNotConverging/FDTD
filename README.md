@@ -4,8 +4,9 @@ A research-oriented Python implementation of one-, two-, and three-dimensional
 finite-difference time-domain solvers on Yee-staggered grids.
 
 The project supports named anisotropic materials, electric and magnetic loss,
-native PEC/PMC geometry, CFS-CPML boundaries in 2D and 3D, multiple source
-types, field monitors, power spectra, and near-field-to-far-field transforms.
+multipole Debye/Drude/Lorentz electric dispersion, native PEC/PMC geometry,
+CFS-CPML boundaries in 2D and 3D, multiple source types, field monitors, power
+spectra, and near-field-to-far-field transforms.
 Optional Cython and Numba-CUDA backends accelerate the main numerical work
 while retaining portable NumPy/Python fallbacks.
 
@@ -58,6 +59,25 @@ material = sim.add_material(
     sigma_m=0.0,
 )
 ```
+
+Here `epsilon_r` is the instantaneous (high-frequency) permittivity. Optional
+dispersive poles may be combined and repeated:
+
+```python
+dispersive = sim.add_material(
+    "dispersive",
+    epsilon_r=2.0,
+    debye={"delta_epsilon": 1.5, "tau": 8e-12},
+    drude={"omega_p": 2.0e12, "gamma": 8.0e10},
+    lorentz=[
+        {"delta_epsilon": 0.8, "omega_0": 3.0e12, "gamma": 6.0e10},
+        {"delta_epsilon": 0.2, "omega_0": 5.0e12, "gamma": 9.0e10},
+    ],
+)
+```
+
+`omega_p`, `omega_0`, and `gamma` are angular frequencies in radians per
+second; `tau` is in seconds. Pole parameters can also be Cartesian triples.
 
 `vacuum`, `PEC`, and `PMC` are predefined.
 

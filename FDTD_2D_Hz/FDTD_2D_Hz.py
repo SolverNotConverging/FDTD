@@ -2,7 +2,13 @@ import numpy as np
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
 import warnings
-from FDTD_common import Material, as_triple
+from FDTD_common import (
+    ADEState,
+    Material,
+    as_triple,
+    average_pole_fields,
+    blend_pole_fields,
+)
 from FDTD_common.broadband import (
     align_modal_anchor_phases,
     interpolate_modal_anchors,
@@ -129,6 +135,19 @@ class FDTD_2D_Hz:
         self.SIGExx_Ex = np.zeros((self.Nx, self.Ny + 1))
         self.SIGEyy_Ey = np.zeros((self.Nx + 1, self.Ny))
         self.SIGMzz_Hz = np.zeros((self.Nx, self.Ny))
+        # Electric pole strengths are rasterized at cell centers, then mapped
+        # independently to the Ex and Ey faces.  Pole rates stay in separate
+        # channels; only their forcing strengths are spatially averaged.
+        self._pole_fields_Ex = []
+        self._pole_fields_Ey = []
+        self._pole_fields_Ex_yee = []
+        self._pole_fields_Ey_yee = []
+        self._ade_Ex = None
+        self._ade_Ey = None
+        self._ade_dirty = True
+        self._ade_update_pending = False
+        self._ade_last_Dx = None
+        self._ade_last_Dy = None
         self.materials = {}
         self.add_material("vacuum")
         self.add_material("PEC", kind="PEC")
@@ -250,6 +269,10 @@ class FDTD_2D_Hz:
         self.SIGExx_Ex = self._to_y_faces(self.SIGExx)
         self.SIGEyy_Ey = self._to_x_faces(self.SIGEyy)
         self.SIGMzz_Hz = self.SIGMzz.copy()
+        self._pole_fields_Ex_yee = average_pole_fields(
+            self._pole_fields_Ex, self._to_y_faces)
+        self._pole_fields_Ey_yee = average_pole_fields(
+            self._pole_fields_Ey, self._to_x_faces)
 
     def _ensure_material_state(self):
         """Upgrade states saved before named lossy materials were introduced."""
@@ -261,11 +284,38 @@ class FDTD_2D_Hz:
             self.add_material("vacuum")
             self.add_material("PEC", kind="PEC")
             self.add_material("PMC", kind="PMC")
+        missing_ade_state = False
+        for name in ("_pole_fields_Ex", "_pole_fields_Ey"):
+            if not hasattr(self, name):
+                setattr(self, name, [])
+                missing_ade_state = True
+        for name in ("_pole_fields_Ex_yee", "_pole_fields_Ey_yee"):
+            if not hasattr(self, name):
+                setattr(self, name, [])
+        for name in ("_ade_Ex", "_ade_Ey"):
+            if not hasattr(self, name):
+                setattr(self, name, None)
+                missing_ade_state = True
+        if not hasattr(self, "_ade_update_pending"):
+            self._ade_update_pending = False
+        if not hasattr(self, "_ade_last_Dx"):
+            self._ade_last_Dx = None
+        if not hasattr(self, "_ade_last_Dy"):
+            self._ade_last_Dy = None
+        if not hasattr(self, "_ade_dirty"):
+            self._ade_dirty = True
+        elif missing_ade_state:
+            self._ade_dirty = True
         self._average_material_to_yee()
 
     def add_material(self, name, epsilon_r=1.0, mu_r=1.0, sigma_e=0.0,
-                     sigma_m=0.0, kind="ordinary"):
-        material = Material(name, epsilon_r, mu_r, sigma_e, sigma_m, kind)
+                     sigma_m=0.0, kind="ordinary", debye=None, drude=None,
+                     lorentz=None):
+        material = Material(
+            name=name, epsilon_r=epsilon_r, mu_r=mu_r,
+            sigma_e=sigma_e, sigma_m=sigma_m, kind=kind,
+            debye=debye, drude=drude, lorentz=lorentz,
+        )
         self.materials[material.name.lower()] = material
         return material
 
@@ -287,10 +337,10 @@ class FDTD_2D_Hz:
             special = defined.kind if defined.kind in {"PEC", "PMC"} else None
             return (special, defined.epsilon_r[0], defined.epsilon_r[1],
                     defined.mu_r[2], defined.sigma_e[0], defined.sigma_e[1],
-                    defined.sigma_m[2])
+                    defined.sigma_m[2], defined)
         special = self._parse_special_material(ER, MR, None)
         if special is not None:
-            return special, None, None, None, None, None, None
+            return special, None, None, None, None, None, None, None
         if ER is None or MR is None:
             raise ValueError("ER and MR are required for a dielectric/magnetic shape.")
         er = as_triple(ER, "ER", positive=True)
@@ -299,7 +349,63 @@ class FDTD_2D_Hz:
                        "sigma_e", nonnegative=True)
         sm = as_triple(0.0 if sigma_m is None else sigma_m,
                        "sigma_m", nonnegative=True)
-        return None, er[0], er[1], mr[2], se[0], se[1], sm[2]
+        return None, er[0], er[1], mr[2], se[0], se[1], sm[2], None
+
+    def _blend_dispersion(self, index, fraction, material):
+        """Convexly paint the x/y electric pole strengths in one cell."""
+        cell_shape = (self.Nx, self.Ny)
+        blend_pole_fields(
+            self._pole_fields_Ex, cell_shape, index, fraction, material, 0)
+        blend_pole_fields(
+            self._pole_fields_Ey, cell_shape, index, fraction, material, 1)
+        self._ade_dirty = True
+        self._ade_update_pending = False
+        self._ade_last_Dx = None
+        self._ade_last_Dy = None
+
+    @property
+    def has_dispersion(self):
+        return bool(self._pole_fields_Ex or self._pole_fields_Ey)
+
+    def _has_dispersion(self):
+        return self.has_dispersion
+
+    def _ensure_ade_state(self):
+        """Build face-centered ADE coefficients without discarding live state."""
+        if not self._ade_dirty:
+            return
+        previous_ex, previous_ey = self._ade_Ex, self._ade_Ey
+        self._average_material_to_yee()
+        if not (self._pole_fields_Ex_yee or self._pole_fields_Ey_yee):
+            self._ade_Ex = None
+            self._ade_Ey = None
+            self._ade_dirty = False
+            self._ade_update_pending = False
+            self._ade_last_Dx = None
+            self._ade_last_Dy = None
+            return
+        self._ade_Ex = ADEState(
+            self.ERxx_Ex, self.SIGExx_Ex, self.eps0, self.dt, self.M,
+            self._pole_fields_Ex_yee, self.PEC_Ex).copy_history_from(previous_ex)
+        self._ade_Ey = ADEState(
+            self.ERyy_Ey, self.SIGEyy_Ey, self.eps0, self.dt, self.M,
+            self._pole_fields_Ey_yee, self.PEC_Ey).copy_history_from(previous_ey)
+        self._ade_dirty = False
+        self._ade_update_pending = False
+        self._ade_last_Dx = None
+        self._ade_last_Dy = None
+
+    def _ade_displacement_changed(self):
+        """Return whether total displacement changed since the last ADE solve."""
+        if self._ade_last_Dx is None or self._ade_last_Dy is None:
+            return True
+        return (not np.array_equal(self.Dx, self._ade_last_Dx)
+                or not np.array_equal(self.Dy, self._ade_last_Dy))
+
+    def _remember_ade_displacement(self):
+        self._ade_update_pending = False
+        self._ade_last_Dx = self.Dx.copy()
+        self._ade_last_Dy = self.Dy.copy()
 
     def config(self, backend="cpu"):
         """Select ``cpu`` (Cython) or ``gpu`` (Numba-CUDA), with Python fallback."""
@@ -402,12 +508,17 @@ class FDTD_2D_Hz:
             self.PMC_cells[cells] = True
             self.PEC_cells[cells] = False
         self._refresh_conductor_masks()
+        self._ade_dirty = True
+        self._ade_update_pending = False
+        self._ade_last_Dx = None
+        self._ade_last_Dy = None
 
     # ---------- geometry helpers ----------
     def add_rectangle(self, ER=None, MR=None, x_position=None, y_position=None,
                       subpixel=None, material=None, sigma_e=None, sigma_m=None):
         (special, ERxx_obj, ERyy_obj, MRzz_obj, SIGExx_obj, SIGEyy_obj,
-         SIGMzz_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
+         SIGMzz_obj, pole_material) = self._shape_material(
+            ER, MR, material, sigma_e, sigma_m)
 
         def edge_to_m(val, axis='x'):
             if isinstance(val, (int, np.integer)): return (val * (self.dx if axis == 'x' else self.dy))
@@ -465,6 +576,7 @@ class FDTD_2D_Hz:
                 self.SIGExx[i, j] = (1.0 - f) * self.SIGExx[i, j] + f * SIGExx_obj
                 self.SIGEyy[i, j] = (1.0 - f) * self.SIGEyy[i, j] + f * SIGEyy_obj
                 self.SIGMzz[i, j] = (1.0 - f) * self.SIGMzz[i, j] + f * SIGMzz_obj
+                self._blend_dispersion((i, j), f, pole_material)
 
         self._average_material_to_yee()
 
@@ -480,7 +592,8 @@ class FDTD_2D_Hz:
         nsub: supersamples per axis (nsub x nsub per cell) for area fraction.
         """
         (special, ERxx_obj, ERyy_obj, MRzz_obj, SIGExx_obj, SIGEyy_obj,
-         SIGMzz_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
+         SIGMzz_obj, pole_material) = self._shape_material(
+            ER, MR, material, sigma_e, sigma_m)
 
         # --- parse geometry ---
         if not (isinstance(center, (list, tuple)) and len(center) == 2):
@@ -571,6 +684,7 @@ class FDTD_2D_Hz:
                 self.SIGExx[i, j] = (1.0 - f) * self.SIGExx[i, j] + f * SIGExx_obj
                 self.SIGEyy[i, j] = (1.0 - f) * self.SIGEyy[i, j] + f * SIGEyy_obj
                 self.SIGMzz[i, j] = (1.0 - f) * self.SIGMzz[i, j] + f * SIGMzz_obj
+                self._blend_dispersion((i, j), f, pole_material)
 
         self._average_material_to_yee()
 
@@ -578,7 +692,8 @@ class FDTD_2D_Hz:
                      material=None, sigma_e=None, sigma_m=None):
         """Add a triangular dielectric, magnetic material, PEC, or PMC region."""
         (special, ERxx_obj, ERyy_obj, MRzz_obj, SIGExx_obj, SIGEyy_obj,
-         SIGMzz_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
+         SIGMzz_obj, pole_material) = self._shape_material(
+            ER, MR, material, sigma_e, sigma_m)
 
         if not (isinstance(vertices, (list, tuple, np.ndarray)) and len(vertices) == 3
                 and all(len(vertex) == 2 for vertex in vertices)):
@@ -637,6 +752,7 @@ class FDTD_2D_Hz:
                 self.SIGExx[i, j] = (1.0 - fraction) * self.SIGExx[i, j] + fraction * SIGExx_obj
                 self.SIGEyy[i, j] = (1.0 - fraction) * self.SIGEyy[i, j] + fraction * SIGEyy_obj
                 self.SIGMzz[i, j] = (1.0 - fraction) * self.SIGMzz[i, j] + fraction * SIGMzz_obj
+                self._blend_dispersion((i, j), fraction, pole_material)
         self._average_material_to_yee()
 
         # ---------- PML ----------
@@ -741,6 +857,12 @@ class FDTD_2D_Hz:
         self.CbEy = self.Ey_update_coeff * self.M / (self.ERyy_Ey * (1 + electric_y_ratio))
         self.CaHz = self.Hz_update_coeff * (1 - magnetic_ratio) / (1 + magnetic_ratio)
         self.CbHz = self.Hz_update_coeff * self.M / (self.MRzz_Hz * (1 + magnetic_ratio))
+        self._ensure_ade_state()
+        if self._has_dispersion():
+            # Keep the public coefficient arrays meaningful for diagnostics;
+            # the coupled ADE solve also includes the polarization histories.
+            self.CaEx, self.CbEx = self._ade_Ex.ca, self._ade_Ex.cb
+            self.CaEy, self.CbEy = self._ade_Ey.ca, self._ade_Ey.cb
 
     def _g(self, s, t):
         """
@@ -1566,7 +1688,8 @@ class FDTD_2D_Hz:
                 self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x):
             self._cython_kernel.curl_e(self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x, self.dx, self.dy)
             return
-        if self.backend == "numba_cuda":
+        if (self.backend == "numba_cuda"
+                and not getattr(self, "_ade_cuda_host_fallback", False)):
             ex_d = _numba_cuda.to_device(self.Ex)
             ey_d = _numba_cuda.to_device(self.Ey)
             dexy_d = _numba_cuda.device_array_like(self.d_Ex_y)
@@ -1605,7 +1728,8 @@ class FDTD_2D_Hz:
             self._cython_kernel.curl_h(self.Hz, self.d_Hz_y, self.d_Hz_x,
                                        self.dx, self.dy, per_x, per_y)
             return
-        if self.backend == "numba_cuda":
+        if (self.backend == "numba_cuda"
+                and not getattr(self, "_ade_cuda_host_fallback", False)):
             hz_d = _numba_cuda.to_device(self.Hz)
             dhzy_d = _numba_cuda.device_array_like(self.d_Hz_y)
             dhzx_d = _numba_cuda.device_array_like(self.d_Hz_x)
@@ -1637,17 +1761,62 @@ class FDTD_2D_Hz:
         self.Psi_Dx_y = self.b_Dx_y * self.Psi_Dx_y + self.c_Dx_y * self.d_Hz_y
         self.Psi_Dy_x = self.b_Dy_x * self.Psi_Dy_x + self.c_Dy_x * self.d_Hz_x
 
-    def update_D(self):
-        self.Ex = self.CaEx * self.Ex + self.CbEx * (
-                self.d_Hz_y / self.kappa_y_Ex + self.Psi_Dx_y)
-        self.Ey = self.CaEy * self.Ey - self.CbEy * (
-                self.d_Hz_x / self.kappa_x_Ey + self.Psi_Dy_x)
+    def update_D(self, finalize=True):
+        if self._ade_dirty:
+            self._init_Coeff()
+        curl_x = self.d_Hz_y / self.kappa_y_Ex + self.Psi_Dx_y
+        curl_y = self.d_Hz_x / self.kappa_x_Ey + self.Psi_Dy_x
+        if self._has_dispersion():
+            if self._ade_dirty or self._ade_Ex is None or self._ade_Ey is None:
+                self._init_Coeff()
+            # Dx/Dy are normalized total displacements, including every
+            # polarization channel.  The signs match curl(H)_x and curl(H)_y.
+            self.Dx = self._ade_Ex.displacement(self.Ex) + self.M * curl_x
+            self.Dy = self._ade_Ey.displacement(self.Ey) - self.M * curl_y
+            self._ade_update_pending = True
+            if finalize:
+                self.update_E()
+            return
+
+        # Preserve the original arithmetic for nondispersive simulations.
+        self.Ex = self.CaEx * self.Ex + self.CbEx * curl_x
+        self.Ey = self.CaEy * self.Ey - self.CbEy * curl_y
         self.Dx = self.ERxx_Ex * self.Ex
         self.Dy = self.ERyy_Ey * self.Ey
 
     def update_E(self):
         self.Dx[self.PEC_Ex] = 0.0
         self.Dy[self.PEC_Ey] = 0.0
+        if self._has_dispersion():
+            state_changed = (self._ade_dirty or self._ade_Ex is None
+                             or self._ade_Ey is None)
+            if state_changed:
+                self._init_Coeff()
+            if state_changed:
+                self.Dx = self._ade_Ex.displacement(self.Ex)
+                self.Dy = self._ade_Ey.displacement(self.Ey)
+                self.Dx[self.PEC_Ex] = 0.0
+                self.Dy[self.PEC_Ey] = 0.0
+                self.Ex[self.PEC_Ex] = 0.0
+                self.Ey[self.PEC_Ey] = 0.0
+                self._remember_ade_displacement()
+                return
+            if not state_changed and not self._ade_update_pending:
+                if not self._ade_displacement_changed():
+                    return
+                if self._ade_last_Dx is not None and self._ade_last_Dy is not None:
+                    delta_x = self.Dx - self._ade_last_Dx
+                    delta_y = self.Dy - self._ade_last_Dy
+                    self.Dx = self._ade_Ex.correct_displacement(self.Ex, delta_x)
+                    self.Dy = self._ade_Ey.correct_displacement(self.Ey, delta_y)
+                    self.Ex[self.PEC_Ex] = 0.0
+                    self.Ey[self.PEC_Ey] = 0.0
+                    self._remember_ade_displacement()
+                    return
+            self.Dx = self._ade_Ex.solve_displacement(self.Ex, self.Dx)
+            self.Dy = self._ade_Ey.solve_displacement(self.Ey, self.Dy)
+            self._remember_ade_displacement()
+            return
         self.Ex = self.Dx / self.ERxx_Ex
         self.Ey = self.Dy / self.ERyy_Ey
         self.Ex[self.PEC_Ex] = 0.0
@@ -1655,11 +1824,20 @@ class FDTD_2D_Hz:
 
     # ---------- main loop ----------
     def run(self, record_stride=1, is_include_history=True):
-        if self.backend == "numba_cuda":
+        has_dispersion = self._has_dispersion()
+        self._ade_cuda_host_fallback = bool(
+            self.backend == "numba_cuda" and has_dispersion)
+        if self.backend == "numba_cuda" and not has_dispersion:
             from FDTD_common.cuda_2d import run_te
             run_te(self, record_stride=record_stride,
                    is_include_history=is_include_history)
             return
+        if self._ade_cuda_host_fallback:
+            warnings.warn(
+                "The resident CUDA TEz loop does not yet support dispersive "
+                "ADE materials; using host update loops for this run.",
+                RuntimeWarning,
+            )
         self._init_Coeff()
         self.is_include_history = is_include_history
         Nx, Ny = self.Nx, self.Ny
@@ -1909,7 +2087,7 @@ class FDTD_2D_Hz:
                                 self.d_Hz_x[x, j] -= (1.0 / self.dx) * H_src * s["Hz_src"][j - lo]
 
             self.calcualte_Psi_D()
-            self.update_D()
+            self.update_D(finalize=False)
             # update E
             self.update_E()
 

@@ -79,6 +79,29 @@ half-open spans. Curved ordinary geometry uses subpixel volume sampling;
 ``subpixel=4`` means 4 samples along each voxel axis. PEC and PMC are predefined
 and applied as exact Yee-component constraints.
 
+Electric dispersion
+-------------------
+
+Each electric component supports simultaneous, multipole Debye, Drude, and
+Lorentz response. Pole arguments may be scalars or diagonal Cartesian triples:
+
+.. code-block:: python
+
+   dispersive = sim.add_material(
+       "dispersive",
+       epsilon_r=(2.0, 2.2, 2.4),
+       debye={"delta_epsilon": (1.0, 1.1, 1.2), "tau": 10e-12},
+       drude={"omega_p": 2e12, "gamma": 8e10},
+       lorentz={"delta_epsilon": 0.75, "omega_0": 3.5e12,
+                "gamma": 5e10},
+   )
+
+``epsilon_r`` is the instantaneous/high-frequency permittivity. ``omega_p``,
+``omega_0``, and ``gamma`` are angular frequencies in radians per second.
+Voxel fill fractions and Yee interpolation act on pole forcing strength; pole
+rates remain separate. The ADE polarization memories are cleared by
+``reset_fields`` and at PEC locations.
+
 CFS-CPML
 --------
 
@@ -260,6 +283,11 @@ large monitor history would consume too much device memory.
 
 If Numba-CUDA or a CUDA device is unavailable, ``config("gpu")`` emits a
 warning and selects the NumPy fallback.
+
+The compiled 3D loops do not yet carry ADE histories. A dispersive run selected
+through either the Cython or CUDA backend therefore emits a warning and uses
+the equivalent NumPy time loop. Nondispersive runs keep the accelerated backend
+behavior described above.
 
 Build the extension from the project root:
 

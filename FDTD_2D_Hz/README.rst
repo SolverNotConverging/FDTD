@@ -74,6 +74,29 @@ indices. Curved and partially filled ordinary cells use subpixel area sampling.
 PEC and PMC are predefined exact masks. Direct ``ER``, ``MR``, ``sigma_e``,
 and ``sigma_m`` shape arguments remain supported for compatibility.
 
+Electric dispersion
+-------------------
+
+TEz advances independent pole histories on both ``Ex`` and ``Ey``, using the
+x- and y-directed pole entries respectively:
+
+.. code-block:: python
+
+   dispersive = sim.add_material(
+       "dispersive",
+       epsilon_r=(2.0, 2.5, 1.0),
+       debye={"delta_epsilon": (1.0, 1.5, 0.0), "tau": 10e-12},
+       drude={"omega_p": (2e12, 2.5e12, 0.0), "gamma": 5e10},
+       lorentz={"delta_epsilon": (0.7, 0.9, 0.0),
+                "omega_0": 3e12, "gamma": 4e10},
+   )
+
+``epsilon_r`` is the high-frequency permittivity. Pole frequencies use radians
+per second, and a list may contain multiple poles of the same family.
+The built-in waveguide/modal eigenproblems use ``epsilon_inf`` rather than
+``epsilon(omega)``. Keep modal launch cross-sections nondispersive or supply
+externally calculated modal data.
+
 CFS-CPML and periodic boundaries
 --------------------------------
 
@@ -194,8 +217,10 @@ Save and restore the simulator state with pickle:
    sim.save("tez_run.pkl", include_histories=True)
    restored = FDTD_2D_Hz.load("tez_run.pkl")
 
-States saved before conductivity support are upgraded with zero-loss arrays
-when loaded.
+Live Debye, Drude, and Lorentz polarization/velocity histories are included,
+so a restored dispersive run continues from the saved constitutive state.
+States saved before conductivity or dispersion support are upgraded with
+zero-loss and empty-pole arrays when loaded.
 
 Backends
 --------
@@ -207,6 +232,11 @@ CFS-CPML arrays, masks, and sparse source descriptions once before the run.
 All time-step updates, source injection, monitor sampling, and optional history
 recording then remain on-device, followed by one final output synchronization.
 No host-device copy occurs inside the time loop.
+
+Dispersive runs retain the Cython curl kernels when available. Because the
+resident CUDA loop does not yet store ADE histories, requesting ``gpu`` with a
+dispersive material emits a warning and uses the host update loop for that run.
+The device-resident behavior above is unchanged for nondispersive materials.
 
 Use ``is_include_history=False`` with line monitors when GPU memory is limited.
 If full histories are requested, they remain on the device until completion;

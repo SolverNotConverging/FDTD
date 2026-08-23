@@ -77,6 +77,29 @@ using subpixel midpoint sampling. ``vacuum``, ``PEC``, and ``PMC`` are
 predefined. Direct ``ER``, ``MR``, ``sigma_e``, and ``sigma_m`` arguments are
 retained for compatibility.
 
+Electric dispersion
+-------------------
+
+The y-directed entries of every Debye, Drude, and Lorentz pole are mapped to
+``Ey`` and advanced with auxiliary differential equations. For example:
+
+.. code-block:: python
+
+   sim.add_material(
+       "dispersive_layer",
+       epsilon_r=2.0,
+       debye={"delta_epsilon": 1.5, "tau": 8e-12},
+       drude={"omega_p": 2e12, "gamma": 8e10},
+       lorentz={"delta_epsilon": 0.8, "omega_0": 3e12,
+                "gamma": 6e10},
+   )
+
+``epsilon_r`` is ``epsilon_inf`` for a dispersive material. Frequencies are
+angular frequencies in radians per second. Multiple pole mappings may be
+supplied in a list, and all pole parameters may be Cartesian triples.
+The matched-source impedance and delay use ``epsilon_inf``, so place the source
+node in a nondispersive launch region when accurate impedance matching matters.
+
 Loss
 ----
 
@@ -136,6 +159,9 @@ Cython backend
 The solver imports ``FDTD_1D._cython_kernel_1d`` automatically when it has
 been built. Otherwise equivalent Python loops are used. Build from the project
 root with:
+
+For a dispersive material, the Cython kernel may still update ``Hx`` while the
+ADE constitutive update for ``Ey`` runs in Python.
 
 .. code-block:: console
 

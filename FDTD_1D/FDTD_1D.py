@@ -5,7 +5,7 @@ from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 from tqdm import tqdm
 
-from FDTD_common import Material
+from FDTD_common import ADEState, Material, average_pole_fields, blend_pole_fields
 
 try:
     from . import _cython_kernel_1d as _cython_kernel
@@ -46,6 +46,12 @@ class FDTD_1D:
         self.sigma_m = np.zeros(Nz)
         self.sigma_e_Ey = np.zeros(Nz + 1)
         self.sigma_m_Hx = np.zeros(Nz)
+        self._pole_fields_Ey_cell = []
+        self._pole_fields_Ey = []
+        self._ade_Ey = None
+        # The legacy constructor exposes unit update coefficients until the
+        # first explicit material edit or run-time coefficient initialization.
+        self._material_dirty = False
         self.CaEy = np.ones(Nz + 1)
         self.CaHx = np.ones(Nz)
         self.mEy = np.ones(Nz + 1)
@@ -153,6 +159,42 @@ class FDTD_1D:
         if self.Nz > 1:
             self.sigma_e_Ey[1:-1] = 0.5 * (self.sigma_e[:-1] + self.sigma_e[1:])
         self.sigma_m_Hx[:] = self.sigma_m
+        self._pole_fields_Ey = average_pole_fields(
+            self._pole_fields_Ey_cell, self._cell_values_to_ey)
+
+    @staticmethod
+    def _cell_values_to_ey(cell_values):
+        """Average one cell-centred scalar channel onto the Ey nodes."""
+        out = np.empty(cell_values.shape[0] + 1, dtype=cell_values.dtype)
+        out[[0, -1]] = cell_values[[0, -1]]
+        if cell_values.shape[0] > 1:
+            out[1:-1] = 0.5 * (cell_values[:-1] + cell_values[1:])
+        return out
+
+    def _build_ade_Ey(self):
+        """Build Ey ADE coefficients while preserving compatible pole memory."""
+        previous = self._ade_Ey
+        if not self._pole_fields_Ey:
+            self._ade_Ey = None
+            return
+        current = ADEState(
+            self.ER_Ey, self.sigma_e_Ey, self.eps0, self.dt,
+            self.c0 * self.dt, self._pole_fields_Ey, mask=self.PEC_Ey,
+        )
+
+        current.copy_history_from(previous)
+
+        self._ade_Ey = current
+        self._clear_ade_pec_memory()
+
+    def _clear_ade_pec_memory(self):
+        """Remove latent electric polarization at PEC-constrained Ey nodes."""
+        if self._ade_Ey is None or not np.any(self.PEC_Ey):
+            return
+        for pole in self._ade_Ey.poles:
+            pole["q"][self.PEC_Ey] = 0.0
+            if "v" in pole:
+                pole["v"][self.PEC_Ey] = 0.0
 
     def _init_mEy_mHx(self):
         self._refresh_conductor_masks()
@@ -165,11 +207,24 @@ class FDTD_1D:
                     / (self.ER_Ey * (1 + electric_ratio)))
         self.mHx = (self.Hx_update_coeff * self.c0 * self.dt
                     / (self.MR_Hx * (1 + magnetic_ratio)))
+        self._build_ade_Ey()
+        if self._ade_Ey is not None and self._ade_Ey.dispersive:
+            self.CaEy = self._ade_Ey.ca.copy()
+            self.mEy = self._ade_Ey.cb.copy()
+        self._material_dirty = False
+
+    def _ensure_update_coefficients(self):
+        if self._material_dirty:
+            self._init_mEy_mHx()
 
     def add_material(self, name, epsilon_r=1.0, mu_r=1.0, sigma_e=0.0,
-                     sigma_m=0.0, kind="ordinary"):
+                     sigma_m=0.0, kind="ordinary", *, debye=None, drude=None,
+                     lorentz=None):
         """Define a named material; 1D uses its Ey/Hx tensor components."""
-        material = Material(name, epsilon_r, mu_r, sigma_e, sigma_m, kind)
+        material = Material(
+            name, epsilon_r, mu_r, sigma_e, sigma_m, kind,
+            debye=debye, drude=drude, lorentz=lorentz,
+        )
         self.materials[material.name.lower()] = material
         return material
 
@@ -208,12 +263,14 @@ class FDTD_1D:
             self.PMC_cells[cells] = True
             self.PEC_cells[cells] = False
         self._refresh_conductor_masks()
+        self._material_dirty = True
 
     @staticmethod
     def _cython_compatible(*arrays):
         return all(array.dtype == np.float64 and array.flags.c_contiguous for array in arrays)
 
     def H_Update(self):
+        self._ensure_update_coefficients()
         used = self._cython_kernel is not None and self._cython_compatible(self.Hx, self.Ey, self.CaHx, self.mHx)
         if used:
             self._cython_kernel.update_h(self.Hx, self.Ey, self.CaHx, self.mHx, self.dz)
@@ -223,34 +280,64 @@ class FDTD_1D:
                                + self.mHx[nz] * (self.Ey[nz + 1] - self.Ey[nz]) / self.dz)
         self.Hx[self.PMC_Hx] = 0.0
 
-    def E_Update(self):
-        used = self._cython_kernel is not None and self._cython_compatible(self.Ey, self.Hx, self.CaEy, self.mEy)
+    def E_Update(self, source_index=None, source_curl=0.0):
+        """Advance Ey, optionally coupling one impressed source into the ADE solve."""
+        self._ensure_update_coefficients()
+        dispersive = self._ade_Ey is not None and self._ade_Ey.dispersive
+        used = (not dispersive and self._cython_kernel is not None
+                and self._cython_compatible(self.Ey, self.Hx, self.CaEy, self.mEy))
         if used:
             self._cython_kernel.update_e(self.Ey, self.Hx, self.CaEy, self.mEy, self.dz)
-        if not used:
+        if dispersive:
+            if self.Nz > 1:
+                curl_h = (self.Hx[1:] - self.Hx[:-1]) / self.dz
+                if source_index is not None:
+                    if not 1 <= int(source_index) < self.Nz:
+                        raise ValueError("A coupled ADE source must be on an interior Ey node.")
+                    curl_h[int(source_index) - 1] += float(source_curl)
+                self._ade_Ey.advance(self.Ey, curl_h, slice(1, self.Nz))
+        elif not used:
             for nz in range(1, self.Nz):
                 self.Ey[nz] = (self.CaEy[nz] * self.Ey[nz]
                                + self.mEy[nz] * (self.Hx[nz] - self.Hx[nz - 1]) / self.dz)
 
         if not self.left_absorbing_boundary:
-            self.Ey[0] = (self.CaEy[0] * self.Ey[0]
-                          + self.mEy[0] * self.Hx[0] / self.dz)
+            if dispersive:
+                self._ade_Ey.advance(
+                    self.Ey, self.Hx[:1] / self.dz, slice(0, 1))
+            else:
+                self.Ey[0] = (self.CaEy[0] * self.Ey[0]
+                              + self.mEy[0] * self.Hx[0] / self.dz)
         else:
+            old_endpoint = self.Ey[0].copy()
             adjacent = self.Ey[1]
             S = self.c0 * self.dt / (self.dz * np.sqrt(self.ER[0] * self.MR[0]))
             self.Ey[0] = self.ey_left_past + (S - 1) / (S + 1) * (adjacent - self.Ey[0])
             self.ey_left_past = adjacent
+            if dispersive:
+                self._ade_Ey.advance_imposed(
+                    self.Ey, old_endpoint, slice(0, 1))
 
         if not self.right_absorbing_boundary:
-            self.Ey[-1] = (self.CaEy[-1] * self.Ey[-1]
-                           - self.mEy[-1] * self.Hx[-1] / self.dz)
+            if dispersive:
+                self._ade_Ey.advance(
+                    self.Ey, -self.Hx[-1:] / self.dz, slice(self.Nz, self.Nz + 1))
+            else:
+                self.Ey[-1] = (self.CaEy[-1] * self.Ey[-1]
+                               - self.mEy[-1] * self.Hx[-1] / self.dz)
         else:
+            old_endpoint = self.Ey[-1].copy()
             adjacent = self.Ey[-2]
             S = self.c0 * self.dt / (self.dz * np.sqrt(self.ER[-1] * self.MR[-1]))
             self.Ey[-1] = self.ey_right_past + (S - 1) / (S + 1) * (adjacent - self.Ey[-1])
             self.ey_right_past = adjacent
+            if dispersive:
+                self._ade_Ey.advance_imposed(
+                    self.Ey, old_endpoint, slice(self.Nz, self.Nz + 1))
 
         self.Ey[self.PEC_Ey] = 0.0
+        if dispersive:
+            self._clear_ade_pec_memory()
 
     def add_object(self, ER=None, MR=None, region=None, subpixel=None, material=None,
                    sigma_e=None, sigma_m=None):
@@ -267,11 +354,14 @@ class FDTD_1D:
                 and not isinstance(material, Material)):
             raise TypeError("material must be a name or Material object.")
         legacy_special = self._parse_special_material(ER, MR, None)
+        pole_material = None
         if material is not None:
             if ER is not None or MR is not None or sigma_e is not None or sigma_m is not None:
                 raise ValueError("Use either material or direct ER/MR/sigma arguments, not both.")
             defined = self.get_material(material)
             special = defined.kind if defined.kind in {"PEC", "PMC"} else None
+            if special is None:
+                pole_material = defined
             ER = float(defined.epsilon_r[1])
             MR = float(defined.mu_r[0])
             sigma_e = float(defined.sigma_e[1])
@@ -301,6 +391,10 @@ class FDTD_1D:
                 self.MR[region] = MR
                 self.sigma_e[region] = sigma_e
                 self.sigma_m[region] = sigma_m
+                blend_pole_fields(
+                    self._pole_fields_Ey_cell, (self.Nz,), region, 1.0,
+                    pole_material, 1,
+                )
                 self.PEC_cells[region] = False
                 self.PMC_cells[region] = False
         elif isinstance(region, (tuple, list)) and len(region) == 2:
@@ -329,6 +423,10 @@ class FDTD_1D:
                                      + fill[touched] * sigma_e)
             self.sigma_m[touched] = ((1 - fill[touched]) * self.sigma_m[touched]
                                      + fill[touched] * sigma_m)
+            blend_pole_fields(
+                self._pole_fields_Ey_cell, (self.Nz,), touched, fill[touched],
+                pole_material, 1,
+            )
             self.PEC_cells[touched] = False
             self.PMC_cells[touched] = False
         else:
@@ -337,6 +435,7 @@ class FDTD_1D:
         # Keep component material inspectable immediately after geometry edits.
         self._refresh_conductor_masks()
         self._average_material_to_yee()
+        self._material_dirty = True
 
     def set_boundary(self, left: str = "absorbing", right: str = "absorbing"):
         left = str(left).lower()
@@ -373,6 +472,7 @@ class FDTD_1D:
             self.right_boundary_material = None
 
         self._refresh_conductor_masks()
+        self._material_dirty = True
     def add_source(self, src_position, amplitude=1.0, t0=None, tw=None, is_show=True):
         if isinstance(src_position, (int, np.integer)):
             self.src_index = int(src_position)
@@ -437,6 +537,7 @@ class FDTD_1D:
         C_REF = np.sqrt(np.sqrt(self.MR_Ey[1] / self.ER_Ey[1]))
         C_TRN = np.sqrt(np.sqrt(self.MR_Ey[-2] / self.ER_Ey[-2]))
         C_SRC = np.sqrt(np.sqrt(self.MR_Ey[self.src_index] / self.ER_Ey[self.src_index]))
+        dispersive = self._ade_Ey is not None and self._ade_Ey.dispersive
 
         # Add tqdm progress bar around the loop
         for t_index in tqdm(range(self.Nt), desc="Running simulation", unit="step"):
@@ -446,14 +547,24 @@ class FDTD_1D:
                 Ey_src = self._pulse(t_index * self.dt)
                 self.Hx[self.src_index - 1] -= self.mHx[self.src_index - 1] / self.dz * Ey_src
 
-            self.E_Update()
-
             if self.src_index is not None:
                 EtaR_inv = np.sqrt(self.ER_Ey[self.src_index] / self.MR_Ey[self.src_index])
                 n = np.sqrt(self.ER_Ey[self.src_index] * self.MR_Ey[self.src_index])
                 Hx_src = -EtaR_inv * self._pulse(
                     t_index * self.dt + n * self.dz / (2 * self.c0) + self.dt / 2
                 )
+            else:
+                Hx_src = 0.0
+
+            if dispersive:
+                self.E_Update(
+                    source_index=self.src_index,
+                    source_curl=-Hx_src / self.dz,
+                )
+            else:
+                self.E_Update()
+
+            if self.src_index is not None and not dispersive:
                 self.Ey[self.src_index] -= self.mEy[self.src_index] / self.dz * Hx_src
 
             for nf in range(self.Nf):

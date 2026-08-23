@@ -12,6 +12,8 @@ complete method examples.
 - `sigma_e` is electric conductivity in S/m.
 - `sigma_m` is the magnetic-conductivity coefficient used by the symmetric
   lossy Maxwell update.
+- Debye `tau` is in seconds. Drude/Lorentz `omega_p`, `omega_0`, and `gamma`
+  are angular frequencies in radians per second.
 - Integer geometry coordinates generally mean grid indices; floating-point
   coordinates mean physical positions in metres.
 
@@ -94,6 +96,77 @@ Materials are rasterized on cells and averaged to the physical Yee locations.
 Curved or partially filled geometry uses subpixel sampling. Direct `ER`, `MR`,
 `sigma_e`, and `sigma_m` geometry arguments remain available in 1D/2D for
 compatibility, but named definitions are preferred.
+
+### Debye, Drude, and Lorentz dispersion
+
+`epsilon_r` is the instantaneous/high-frequency relative permittivity
+`epsilon_inf` whenever dispersive poles are present. A material may contain any
+number and combination of the three supported electric pole families:
+
+```python
+material = sim.add_material(
+    "multipole",
+    epsilon_r=(2.0, 2.2, 2.4),
+    sigma_e=1e-3,
+    debye=[
+        {"delta_epsilon": (1.0, 1.1, 1.2), "tau": 10e-12},
+        {"delta_epsilon": 0.3, "tau": 40e-12},
+    ],
+    drude={"omega_p": 2.0e12, "gamma": 8.0e10},
+    lorentz={
+        "delta_epsilon": 0.75,
+        "omega_0": 3.5e12,
+        "gamma": 5.0e10,
+    },
+)
+```
+
+Mappings, `DebyePole`, `DrudePole`, and `LorentzPole` objects, or flat short
+positional tuples for one isotropic pole are accepted. A list of mappings,
+objects, or positional tuples defines multiple poles. Use a mapping or pole
+object for one diagonal-anisotropic pole; its parameter values may be Cartesian
+triples. Passive materials require
+non-negative strengths and damping, positive Debye relaxation time, and
+positive Lorentz resonance frequency. PEC and PMC cannot carry poles.
+`material.relative_permittivity(omega)` evaluates the diagonal complex model
+for angular frequency `omega` using the `exp(-i omega t)` convention;
+`sigma_e` remains a separate conductivity term.
+
+With normalized polarization `q=P/epsilon_0`, the continuous auxiliary
+equations are
+
+\[
+\tau\dot q+q=\Delta\epsilon E,\qquad
+\ddot q+\gamma\dot q=\omega_p^2E,\qquad
+\ddot q+\gamma\dot q+\omega_0^2q=
+\Delta\epsilon\,\omega_0^2E.
+\]
+
+The field update solves all poles and ordinary electric conductivity together.
+Debye uses a centered trapezoidal recurrence; Drude and Lorentz use the
+equivalent trapezoidal first-order polarization/velocity system. This bilinear
+discretization is passive/A-stable for passive pole parameters. Each pole owns
+its ADE history at the appropriate electric Yee locations. PEC masks clear
+both the electric field and its polarization memory.
+
+For partially filled cells, only susceptibility or oscillator forcing strength
+is area/volume averaged. Relaxation, collision, and resonance frequencies stay
+in separate dynamics channels, so overlapping materials with different poles
+are not collapsed into an unphysical averaged frequency.
+
+The ADE constitutive solve always uses the Python/NumPy path. In 1D, a built
+Cython kernel can still update H while ADE updates E. The 2D solvers can still
+use their Cython curl kernels, but a requested resident-CUDA run falls back to
+host updates with a warning. In 3D, a dispersive run requested through either
+the Cython or CUDA backend falls back to the NumPy time loop with a warning.
+Nondispersive accelerated behavior is unchanged.
+
+Soft electric sources are coupled to the same ADE endpoint update, including
+sources placed inside a dispersive object. The 1D matched-source impedance and
+the 2D built-in modal eigenproblems currently use `epsilon_inf`; they do not
+solve frequency-dependent launch modes. Keep those launch planes in a
+nondispersive material, or provide externally calculated modal data where the
+2D source API permits it.
 
 ## Lossy update coefficients
 

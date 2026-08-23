@@ -11,7 +11,13 @@ from pathlib import Path
 import warnings
 
 import numpy as np
-from FDTD_common import Material, as_triple
+from FDTD_common import (
+    ADEState,
+    Material,
+    as_triple,
+    average_pole_fields,
+    blend_pole_fields,
+)
 
 try:
     from numba import cuda as _numba_cuda
@@ -94,6 +100,9 @@ class FDTD_3D:
         self._mr = [np.ones(shape) for _ in range(3)]
         self._sigma_e = [np.zeros(shape) for _ in range(3)]
         self._sigma_m = [np.zeros(shape) for _ in range(3)]
+        # Per-axis cell-centered ADE forcing channels.  Channels with distinct
+        # relaxation/resonance rates remain separate under geometry mixing.
+        self._dispersion = [[], [], []]
         self.PEC_cells = np.zeros(shape, dtype=bool)
         self.PMC_cells = np.zeros(shape, dtype=bool)
 
@@ -142,7 +151,8 @@ class FDTD_3D:
         return self
 
     def add_material(self, name, epsilon_r=1.0, mu_r=1.0, sigma_e=0.0,
-                     sigma_m=0.0, kind="ordinary"):
+                     sigma_m=0.0, kind="ordinary", debye=None, drude=None,
+                     lorentz=None):
         """Define and return a named material for later geometry calls."""
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Material name must be a non-empty string.")
@@ -154,7 +164,8 @@ class FDTD_3D:
         se = as_triple(sigma_e, "sigma_e", nonnegative=True)
         sm = as_triple(sigma_m, "sigma_m", nonnegative=True)
         material = Material(name.strip(), er, mr, se, sm,
-                            "ordinary" if kind == "ORDINARY" else kind)
+                            "ordinary" if kind == "ORDINARY" else kind,
+                            debye, drude, lorentz)
         self.materials[material.name.lower()] = material
         return material
 
@@ -228,7 +239,7 @@ class FDTD_3D:
         self.mu_Hz = self.mu0 * self._face_average(self._mr[2], 2)
         sigma_e = [self._edge_average(self._sigma_e[c], c) for c in range(3)]
         sigma_m = [self._face_average(self._sigma_m[c], c) for c in range(3)]
-        eps = [self.epsilon_Ex, self.epsilon_Ey, self.epsilon_Ez]
+        er_edges = [self._edge_average(self._er[c], c) for c in range(3)]
         mu = [self.mu_Hx, self.mu_Hy, self.mu_Hz]
         e_masks = [self._edge_mask(self.PEC_cells, c) for c in range(3)]
         h_masks = [self._face_mask(self.PMC_cells, c) for c in range(3)]
@@ -247,9 +258,28 @@ class FDTD_3D:
         e_masks[2][:, -1, :] = True
         self.PEC_Ex, self.PEC_Ey, self.PEC_Ez = e_masks
         self.PMC_Hx, self.PMC_Hy, self.PMC_Hz = h_masks
-        self.CaEx, self.CbEx = self._loss_coeff(eps[0], sigma_e[0], e_masks[0])
-        self.CaEy, self.CbEy = self._loss_coeff(eps[1], sigma_e[1], e_masks[1])
-        self.CaEz, self.CbEz = self._loss_coeff(eps[2], sigma_e[2], e_masks[2])
+        previous_ade = [
+            getattr(self, name, None) for name in ("ade_Ex", "ade_Ey", "ade_Ez")
+        ]
+        edge_poles = [average_pole_fields(
+            self._dispersion[c], lambda values, component=c:
+            self._edge_average(values, component)) for c in range(3)]
+        ade_states = [
+            (ADEState(er_edges[c], sigma_e[c], self.eps0, self.dt,
+                      self.dt / self.eps0, edge_poles[c], e_masks[c])
+             .copy_history_from(previous_ade[c]))
+            if edge_poles[c] else None
+            for c in range(3)
+        ]
+        self.ade_Ex, self.ade_Ey, self.ade_Ez = ade_states
+        electric = [self.epsilon_Ex, self.epsilon_Ey, self.epsilon_Ez]
+        electric_coefficients = [
+            (state.ca, state.cb) if state is not None and state.dispersive
+            else self._loss_coeff(electric[c], sigma_e[c], e_masks[c])
+            for c, state in enumerate(ade_states)
+        ]
+        (self.CaEx, self.CbEx), (self.CaEy, self.CbEy), \
+            (self.CaEz, self.CbEz) = electric_coefficients
         self.CaHx, self.CbHx = self._loss_coeff(mu[0], sigma_m[0], h_masks[0])
         self.CaHy, self.CbHy = self._loss_coeff(mu[1], sigma_m[1], h_masks[1])
         self.CaHz, self.CbHz = self._loss_coeff(mu[2], sigma_m[2], h_masks[2])
@@ -318,6 +348,8 @@ class FDTD_3D:
                 self._mr[c][region] = ((1 - fractions) * self._mr[c][region] + fractions * mat.mu_r[c])
                 self._sigma_e[c][region] = ((1 - fractions) * self._sigma_e[c][region] + fractions * mat.sigma_e[c])
                 self._sigma_m[c][region] = ((1 - fractions) * self._sigma_m[c][region] + fractions * mat.sigma_m[c])
+                blend_pole_fields(self._dispersion[c], self._er[c].shape,
+                                  region, fractions, mat, c)
             occupied = fractions > 0.0
             pec = self.PEC_cells[region];
             pec[occupied] = False;
@@ -611,6 +643,10 @@ class FDTD_3D:
     def reset_fields(self):
         for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
             getattr(self, name).fill(0.0)
+        for name in ("ade_Ex", "ade_Ey", "ade_Ez"):
+            state = getattr(self, name, None)
+            if state is not None:
+                state.reset()
         self._allocate_psi()
         self.current_step = 0
         self.monitor_results = []
@@ -662,9 +698,20 @@ class FDTD_3D:
         steps = self.Nt if steps is None else int(steps)
         stride = int(record_stride)
         if steps < 1 or stride < 1: raise ValueError("steps and record_stride must be positive.")
-        if self.backend == "numba_cuda":
+        has_dispersion = any(
+            state is not None and state.dispersive
+            for state in (self.ade_Ex, self.ade_Ey, self.ade_Ez))
+        if self.backend == "numba_cuda" and not has_dispersion:
             from FDTD_common.cuda_3d import run_gpu
+            self._last_run_backend = "numba_cuda"
             return run_gpu(self, steps, stride, progress, progress_desc)
+        if has_dispersion and self.backend in {"cython", "numba_cuda"}:
+            warnings.warn(
+                f"The 3D {self.backend} backend does not yet carry ADE state; "
+                "using the equivalent NumPy dispersive update for this run.",
+                RuntimeWarning,
+            )
+        self._last_run_backend = ("python" if has_dispersion else self.backend)
         source_data = self._compile_sources(steps)
         monitor_coords, history, record_steps = self._compile_monitors(steps, stride)
         if progress:
@@ -688,7 +735,7 @@ class FDTD_3D:
                 rec_start = start // stride
                 rec_count = (count + stride - 1) // stride
                 chunk_history = history[rec_start:rec_start + rec_count]
-                if self.backend == "cython":
+                if self.backend == "cython" and not has_dispersion:
                     _cython_kernel.run_fdtd(*self._kernel_arguments(
                         chunk_source, monitor_coords, chunk_history, stride))
                 else:
@@ -720,15 +767,52 @@ class FDTD_3D:
 
     def _run_numpy(self, steps, source_data, monitor_coords, history, stride):
         values, coords, source_ids, pols = source_data
+        electric_fields = (self.Ex, self.Ey, self.Ez)
+        ade_states = (self.ade_Ex, self.ade_Ey, self.ade_Ez)
+        has_dispersion = any(
+            state is not None and state.dispersive for state in ade_states)
         rec = 0
         for n in range(steps):
             self._update_h_numpy();
             self._update_e_numpy()
-            for q, (i, j, k) in enumerate(coords):
-                (self.Ex, self.Ey, self.Ez)[pols[q]][i, j, k] += values[n, source_ids[q]]
+            if has_dispersion:
+                for q, (i, j, k) in enumerate(coords):
+                    component = pols[q]
+                    field = electric_fields[component]
+                    index = (i, j, k)
+                    old_endpoint = field[index]
+                    field[index] += values[n, source_ids[q]]
+                    self._correct_ade_source_endpoint(
+                        ade_states[component], index,
+                        field[index] - old_endpoint,
+                    )
+            else:
+                # Keep the original source arithmetic and ordering exactly for
+                # the non-dispersive reference path.
+                for q, (i, j, k) in enumerate(coords):
+                    (self.Ex, self.Ey, self.Ez)[pols[q]][i, j, k] += values[n, source_ids[q]]
             if n % stride == 0:
                 history[rec] = self._sample_cells(monitor_coords);
                 rec += 1
+
+    def _correct_ade_source_endpoint(self, state, index, field_increment):
+        """Include a post-update soft-source increment in the ADE endpoint.
+
+        ``ADEState.advance`` has already solved the field before sparse soft
+        sources are added.  The trapezoidal pole recurrences are linear in the
+        new endpoint field, so these corrections are exactly the missing part
+        of that same constitutive solve while retaining legacy additive-source
+        field semantics.
+        """
+        if state is None or field_increment == 0.0:
+            return
+        for pole in state.debye:
+            pole["q"][index] += pole["r"][index] * field_increment
+        velocity_scale = 2.0 / self.dt
+        for pole in state.oscillators:
+            correction = pole["r"][index] * field_increment
+            pole["q"][index] += correction
+            pole["v"][index] += velocity_scale * correction
 
     def _update_h_numpy(self):
         p = self._pml
@@ -764,7 +848,12 @@ class FDTD_3D:
                                        p["z"]["node_c"][None, None, 1:-1] * dyz[:, 1:-1, :]
         curl = dzy[:, :, 1:-1] / p["y"]["node_k"][None, 1:-1, None] + self.Psi_Ex_y[:, 1:-1, 1:-1] - dyz[:, 1:-1, :] / \
                p["z"]["node_k"][None, None, 1:-1] - self.Psi_Ex_z[:, 1:-1, 1:-1]
-        self.Ex[:, 1:-1, 1:-1] = self.CaEx[:, 1:-1, 1:-1] * self.Ex[:, 1:-1, 1:-1] + self.CbEx[:, 1:-1, 1:-1] * curl
+        ex_region = (slice(None), slice(1, -1), slice(1, -1))
+        if self.ade_Ex is not None and self.ade_Ex.dispersive:
+            self.ade_Ex.advance(self.Ex, curl, ex_region)
+        else:
+            self.Ex[ex_region] = (self.CaEx[ex_region] * self.Ex[ex_region]
+                                  + self.CbEx[ex_region] * curl)
         dxz = (self.Hx[:, :, 1:] - self.Hx[:, :, :-1]) / self.dz
         dzx = (self.Hz[1:, :, :] - self.Hz[:-1, :, :]) / self.dx
         self.Psi_Ey_z[1:-1, :, 1:-1] = p["z"]["node_b"][None, None, 1:-1] * self.Psi_Ey_z[1:-1, :, 1:-1] + \
@@ -773,7 +862,12 @@ class FDTD_3D:
                                        p["x"]["node_c"][1:-1, None, None] * dzx[:, :, 1:-1]
         curl = dxz[1:-1, :, :] / p["z"]["node_k"][None, None, 1:-1] + self.Psi_Ey_z[1:-1, :, 1:-1] - dzx[:, :, 1:-1] / \
                p["x"]["node_k"][1:-1, None, None] - self.Psi_Ey_x[1:-1, :, 1:-1]
-        self.Ey[1:-1, :, 1:-1] = self.CaEy[1:-1, :, 1:-1] * self.Ey[1:-1, :, 1:-1] + self.CbEy[1:-1, :, 1:-1] * curl
+        ey_region = (slice(1, -1), slice(None), slice(1, -1))
+        if self.ade_Ey is not None and self.ade_Ey.dispersive:
+            self.ade_Ey.advance(self.Ey, curl, ey_region)
+        else:
+            self.Ey[ey_region] = (self.CaEy[ey_region] * self.Ey[ey_region]
+                                  + self.CbEy[ey_region] * curl)
         dyx = (self.Hy[1:, :, :] - self.Hy[:-1, :, :]) / self.dx
         dxy = (self.Hx[:, 1:, :] - self.Hx[:, :-1, :]) / self.dy
         self.Psi_Ez_x[1:-1, 1:-1, :] = p["x"]["node_b"][1:-1, None, None] * self.Psi_Ez_x[1:-1, 1:-1, :] + \
@@ -782,7 +876,12 @@ class FDTD_3D:
                                        p["y"]["node_c"][None, 1:-1, None] * dxy[1:-1, :, :]
         curl = dyx[:, 1:-1, :] / p["x"]["node_k"][1:-1, None, None] + self.Psi_Ez_x[1:-1, 1:-1, :] - dxy[1:-1, :, :] / \
                p["y"]["node_k"][None, 1:-1, None] - self.Psi_Ez_y[1:-1, 1:-1, :]
-        self.Ez[1:-1, 1:-1, :] = self.CaEz[1:-1, 1:-1, :] * self.Ez[1:-1, 1:-1, :] + self.CbEz[1:-1, 1:-1, :] * curl
+        ez_region = (slice(1, -1), slice(1, -1), slice(None))
+        if self.ade_Ez is not None and self.ade_Ez.dispersive:
+            self.ade_Ez.advance(self.Ez, curl, ez_region)
+        else:
+            self.Ez[ez_region] = (self.CaEz[ez_region] * self.Ez[ez_region]
+                                  + self.CbEz[ez_region] * curl)
 
     def _sample_cells(self, coords):
         if len(coords) == 0: return np.empty((0, 6))

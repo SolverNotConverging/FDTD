@@ -3,7 +3,13 @@ from matplotlib.patches import Rectangle
 from tqdm import tqdm
 import warnings
 
-from FDTD_common import Material, as_triple
+from FDTD_common import (
+    ADEState,
+    Material,
+    as_triple,
+    average_pole_fields,
+    blend_pole_fields,
+)
 from FDTD_common.broadband import (
     align_modal_anchor_phases,
     interpolate_modal_anchors,
@@ -130,6 +136,12 @@ class FDTD_2D_Ez:
         self.SIGEzz_Ez = np.zeros((self.Nx + 1, self.Ny + 1))
         self.SIGMxx_Hx = np.zeros((self.Nx + 1, self.Ny))
         self.SIGMyy_Hy = np.zeros((self.Nx, self.Ny + 1))
+        self._pole_fields_Ez = []
+        self._pole_fields_Ez_yee = []
+        self._ade_Ez = None
+        self._ade_dirty = True
+        self._ade_update_pending = False
+        self._ade_last_Dz = None
         self.materials = {}
         self.add_material("vacuum")
         self.add_material("PEC", kind="PEC")
@@ -256,6 +268,38 @@ class FDTD_2D_Ez:
         self.SIGEzz_Ez = self._to_vertices(self.SIGEzz)
         self.SIGMxx_Hx = self._to_x_faces(self.SIGMxx)
         self.SIGMyy_Hy = self._to_y_faces(self.SIGMyy)
+        self._pole_fields_Ez_yee = average_pole_fields(
+            self._pole_fields_Ez, self._to_vertices)
+
+    def _mark_ade_dirty(self):
+        self._ade_dirty = True
+        self._ade_update_pending = False
+        self._ade_last_Dz = None
+
+    def _ensure_ade_state(self):
+        """Build constitutive coefficients only after material geometry changes."""
+        if self._ade_dirty:
+            previous = self._ade_Ez
+            self._pole_fields_Ez_yee = average_pole_fields(
+                self._pole_fields_Ez, self._to_vertices)
+            if self._pole_fields_Ez_yee:
+                self._ade_Ez = ADEState(
+                    self.ERzz_Ez, self.SIGEzz_Ez, self.eps0, self.dt, self.M,
+                    self._pole_fields_Ez_yee, self.PEC_Ez,
+                ).copy_history_from(previous)
+            else:
+                self._ade_Ez = None
+            self._ade_dirty = False
+            self._ade_update_pending = False
+            self._ade_last_Dz = None
+        return self._ade_Ez
+
+    @property
+    def has_dispersion(self):
+        return bool(self._pole_fields_Ez)
+
+    def _has_dispersion(self):
+        return self.has_dispersion
 
     def _ensure_material_state(self):
         """Upgrade states saved before named lossy materials were introduced."""
@@ -267,11 +311,42 @@ class FDTD_2D_Ez:
             self.add_material("vacuum")
             self.add_material("PEC", kind="PEC")
             self.add_material("PMC", kind="PMC")
+        missing_ade_state = False
+        if not hasattr(self, "_pole_fields_Ez"):
+            self._pole_fields_Ez = []
+            missing_ade_state = True
+        if not hasattr(self, "_pole_fields_Ez_yee"):
+            self._pole_fields_Ez_yee = []
+        if not hasattr(self, "_ade_Ez"):
+            self._ade_Ez = None
+            missing_ade_state = True
+        if not hasattr(self, "_ade_update_pending"):
+            self._ade_update_pending = False
+        if not hasattr(self, "_ade_last_Dz"):
+            self._ade_last_Dz = None
+        if not hasattr(self, "_ade_dirty"):
+            self._ade_dirty = True
+        elif missing_ade_state:
+            self._ade_dirty = True
         self._average_material_to_yee()
 
+    def _ade_displacement_changed(self):
+        """Return whether Dz was edited since the last completed ADE solve."""
+        return (self._ade_last_Dz is None
+                or not np.array_equal(self.Dz, self._ade_last_Dz))
+
+    def _remember_ade_displacement(self):
+        self._ade_update_pending = False
+        self._ade_last_Dz = self.Dz.copy()
+
     def add_material(self, name, epsilon_r=1.0, mu_r=1.0, sigma_e=0.0,
-                     sigma_m=0.0, kind="ordinary"):
-        material = Material(name, epsilon_r, mu_r, sigma_e, sigma_m, kind)
+                     sigma_m=0.0, kind="ordinary", debye=None, drude=None,
+                     lorentz=None):
+        material = Material(
+            name=name, epsilon_r=epsilon_r, mu_r=mu_r,
+            sigma_e=sigma_e, sigma_m=sigma_m, kind=kind,
+            debye=debye, drude=drude, lorentz=lorentz,
+        )
         self.materials[material.name.lower()] = material
         return material
 
@@ -410,10 +485,12 @@ class FDTD_2D_Ez:
             self.PMC_cells[cells] = True
             self.PEC_cells[cells] = False
         self._refresh_conductor_masks()
+        self._mark_ade_dirty()
 
     # ---------- geometry helpers ----------
     def add_rectangle(self, ER=None, MR=None, x_position=None, y_position=None,
                       subpixel=None, material=None, sigma_e=None, sigma_m=None):
+        pole_material = self.get_material(material) if material is not None else None
         (special, ERzz_obj, MRxx_obj, MRyy_obj, SIGEzz_obj, SIGMxx_obj,
          SIGMyy_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
 
@@ -473,7 +550,11 @@ class FDTD_2D_Ez:
                 self.SIGEzz[i, j] = (1 - f) * self.SIGEzz[i, j] + f * SIGEzz_obj
                 self.SIGMxx[i, j] = (1 - f) * self.SIGMxx[i, j] + f * SIGMxx_obj
                 self.SIGMyy[i, j] = (1 - f) * self.SIGMyy[i, j] + f * SIGMyy_obj
+                blend_pole_fields(
+                    self._pole_fields_Ez, (Nx, Ny), (i, j), f,
+                    pole_material, 2)
 
+        self._mark_ade_dirty()
         self._average_material_to_yee()
 
     def add_circle(self, ER=None, MR=None, center=None, radius=None, nsub=None,
@@ -487,6 +568,7 @@ class FDTD_2D_Ez:
         radius: float, meters.
         nsub: supersamples per axis (nsub x nsub per cell) for area fraction.
         """
+        pole_material = self.get_material(material) if material is not None else None
         (special, ERzz_obj, MRxx_obj, MRyy_obj, SIGEzz_obj, SIGMxx_obj,
          SIGMyy_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
 
@@ -579,12 +661,17 @@ class FDTD_2D_Ez:
                 self.SIGEzz[i, j] = (1 - f) * self.SIGEzz[i, j] + f * SIGEzz_obj
                 self.SIGMxx[i, j] = (1 - f) * self.SIGMxx[i, j] + f * SIGMxx_obj
                 self.SIGMyy[i, j] = (1 - f) * self.SIGMyy[i, j] + f * SIGMyy_obj
+                blend_pole_fields(
+                    self._pole_fields_Ez, (Nx, Ny), (i, j), f,
+                    pole_material, 2)
 
+        self._mark_ade_dirty()
         self._average_material_to_yee()
 
     def add_triangle(self, ER=None, MR=None, vertices=None, subpixel=None,
                      material=None, sigma_e=None, sigma_m=None):
         """Add a triangular dielectric, magnetic material, PEC, or PMC region."""
+        pole_material = self.get_material(material) if material is not None else None
         (special, ERzz_obj, MRxx_obj, MRyy_obj, SIGEzz_obj, SIGMxx_obj,
          SIGMyy_obj) = self._shape_material(ER, MR, material, sigma_e, sigma_m)
 
@@ -648,6 +735,10 @@ class FDTD_2D_Ez:
                                      + fraction * SIGMxx_obj)
                 self.SIGMyy[i, j] = ((1 - fraction) * self.SIGMyy[i, j]
                                      + fraction * SIGMyy_obj)
+                blend_pole_fields(
+                    self._pole_fields_Ez, (self.Nx, self.Ny), (i, j),
+                    fraction, pole_material, 2)
+        self._mark_ade_dirty()
         self._average_material_to_yee()
 
     # ---------- PML ----------
@@ -753,6 +844,10 @@ class FDTD_2D_Ez:
         self.CaEz = self.Ez_update_coeff * (1 - electric_ratio) / (1 + electric_ratio)
         self.CbEz = (self.Ez_update_coeff * self.M
                      / (self.ERzz_Ez * (1 + electric_ratio)))
+        ade = self._ensure_ade_state()
+        if self.has_dispersion:
+            self.CaEz = ade.ca.copy()
+            self.CbEz = ade.cb.copy()
         self.CaHx = self.Hx_update_coeff * (1 - magnetic_x_ratio) / (1 + magnetic_x_ratio)
         self.CbHx = (self.Hx_update_coeff * self.M
                      / (self.MRxx_Hx * (1 + magnetic_x_ratio)))
@@ -1592,7 +1687,8 @@ class FDTD_2D_Ez:
             self._cython_kernel.curl_e(self.Ez, self.d_Ez_y, self.d_Ez_x,
                                        self.dx, self.dy, per_x, per_y)
             return
-        if self.backend == "numba_cuda":
+        if (self.backend == "numba_cuda"
+                and not getattr(self, "_ade_cuda_host_fallback", False)):
             ez_d = _numba_cuda.to_device(self.Ez)
             dey_d = _numba_cuda.device_array_like(self.d_Ez_y)
             dex_d = _numba_cuda.device_array_like(self.d_Ez_x)
@@ -1638,7 +1734,8 @@ class FDTD_2D_Ez:
             self._cython_kernel.curl_h(self.Hx, self.Hy, self.d_Hx_y, self.d_Hy_x,
                                        self.dx, self.dy, per_x, per_y)
             return
-        if self.backend == "numba_cuda":
+        if (self.backend == "numba_cuda"
+                and not getattr(self, "_ade_cuda_host_fallback", False)):
             hx_d = _numba_cuda.to_device(self.Hx)
             hy_d = _numba_cuda.to_device(self.Hy)
             dhxy_d = _numba_cuda.device_array_like(self.d_Hx_y)
@@ -1669,13 +1766,53 @@ class FDTD_2D_Ez:
         self.Psi_Dz_x = self.b_Dz_x * self.Psi_Dz_x + self.c_Dz_x * self.d_Hy_x
         self.Psi_Dz_y = self.b_Dz_y * self.Psi_Dz_y + self.c_Dz_y * self.d_Hx_y
 
-    def update_D(self):
-        self.Ez = self.CaEz * self.Ez + self.CbEz * (
-                self.d_Hy_x / self.kappa_x_Ez - self.d_Hx_y / self.kappa_y_Ez
+    def update_D(self, finalize=True):
+        if self._ade_dirty:
+            self._init_Coeff()
+        curl = (self.d_Hy_x / self.kappa_x_Ez
+                - self.d_Hx_y / self.kappa_y_Ez
                 + self.Psi_Dz_x - self.Psi_Dz_y)
-        self.Dz = self.ERzz_Ez * self.Ez
+        if not self.has_dispersion:
+            # Retain the original arithmetic and public method behavior for
+            # ordinary/lossy nondispersive materials.
+            self.Ez = self.CaEz * self.Ez + self.CbEz * curl
+            self.Dz = self.ERzz_Ez * self.Ez
+            return
+
+        if self._ade_Ez is None:
+            self._init_Coeff()
+        ade = self._ade_Ez
+        self.Dz = ade.displacement(self.Ez) + self.M * curl
+        self._ade_update_pending = True
+        if finalize:
+            self.update_E()
 
     def update_E(self):
+        if self.has_dispersion:
+            state_changed = self._ade_dirty or self._ade_Ez is None
+            if state_changed:
+                self._init_Coeff()
+            ade = self._ade_Ez
+            if state_changed:
+                self.Dz = ade.displacement(self.Ez)
+                self.Dz[self.PEC_Ez] = 0.0
+                self.Ez[self.PEC_Ez] = 0.0
+                self._remember_ade_displacement()
+                return
+            if not state_changed and not self._ade_update_pending:
+                if not self._ade_displacement_changed():
+                    return
+                if self._ade_last_Dz is not None:
+                    delta_trial = self.Dz - self._ade_last_Dz
+                    self.Dz = ade.correct_displacement(self.Ez, delta_trial)
+                    self.Ez[self.PEC_Ez] = 0.0
+                    self._remember_ade_displacement()
+                    return
+            self.Dz[self.PEC_Ez] = 0.0
+            self.Dz = ade.solve_displacement(self.Ez, self.Dz)
+            self.Ez[self.PEC_Ez] = 0.0
+            self._remember_ade_displacement()
+            return
         self.Dz[self.PEC_Ez] = 0.0
         self.Ez = self.Dz / self.ERzz_Ez
         self.Ez[self.PEC_Ez] = 0.0
@@ -1683,11 +1820,18 @@ class FDTD_2D_Ez:
     # ---------- main loop ----------
 
     def run(self, record_stride=1, is_include_history=True):
-        if self.backend == "numba_cuda":
+        self._ade_cuda_host_fallback = bool(
+            self.backend == "numba_cuda" and self.has_dispersion)
+        if self.backend == "numba_cuda" and not self.has_dispersion:
             from FDTD_common.cuda_2d import run_tm
             run_tm(self, record_stride=record_stride,
                    is_include_history=is_include_history)
             return
+        if self._ade_cuda_host_fallback:
+            warnings.warn(
+                "The resident CUDA TMz loop does not yet support dispersive "
+                "ADE materials; using host update loops for this run.",
+                RuntimeWarning)
         self._init_Coeff()
         self.is_include_history = is_include_history
         Nx, Ny = self.Nx, self.Ny
@@ -1925,7 +2069,7 @@ class FDTD_2D_Ez:
                                 self.d_Hy_x[x, j] += (1.0 / self.dx) * H_src * s["Hy_src"][j - lo]
 
             self.calcualte_Psi_D()
-            self.update_D()
+            self.update_D(finalize=False)
 
             # --- soft sources (point/line-soft) into Dz ---
             t_now = t_index * self.dt

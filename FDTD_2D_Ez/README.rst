@@ -73,6 +73,33 @@ shapes use subpixel area sampling. PEC and PMC use exact conductor masks and do
 not rely on extreme material values. Direct ``ER``, ``MR``, ``sigma_e``, and
 ``sigma_m`` shape arguments remain available for older scripts.
 
+Electric dispersion
+-------------------
+
+TMz consumes the z-directed entries of Debye, Drude, and Lorentz poles. Their
+strengths are vertex-averaged to ``Ez`` while each distinct pole keeps its own
+ADE history:
+
+.. code-block:: python
+
+   dispersive = sim.add_material(
+       "dispersive",
+       epsilon_r=2.0,
+       debye={"delta_epsilon": 1.2, "tau": 10e-12},
+       drude={"omega_p": 2e12, "gamma": 5e10},
+       lorentz=[
+           {"delta_epsilon": 0.7, "omega_0": 3e12, "gamma": 4e10},
+           {"delta_epsilon": 0.2, "omega_0": 5e12, "gamma": 8e10},
+       ],
+   )
+
+Here ``epsilon_r`` is the high-frequency value. All frequencies in a pole are
+angular frequencies in radians per second.
+Point and line-soft displacement sources participate in the coupled ADE solve.
+The built-in waveguide/modal eigenproblems use ``epsilon_inf`` rather than
+``epsilon(omega)``; keep modal launch cross-sections nondispersive or supply
+externally calculated modal data.
+
 CFS-CPML and periodic boundaries
 --------------------------------
 
@@ -201,6 +228,9 @@ The full simulator state can be saved and restored with pickle:
    sim.save("tmz_run.pkl", include_histories=True)
    restored = FDTD_2D_Ez.load("tmz_run.pkl")
 
+Live Debye, Drude, and Lorentz polarization/velocity histories are included,
+so a restored dispersive run continues from the saved constitutive state.
+
 Backends
 --------
 
@@ -211,6 +241,11 @@ material updates, conductor masks, sparse sources, monitor gathering, and
 optional history recording on the device, and copies final/output arrays back
 after the run. There are no host-device transfers inside the GPU time loop.
 ``config("python")`` forces the reference loops.
+
+Dispersive runs retain the Cython curl kernels when available. Because the
+resident CUDA loop does not yet store ADE histories, requesting ``gpu`` with a
+dispersive material emits a warning and uses the host update loop for that run.
+The device-resident behavior above is unchanged for nondispersive materials.
 
 For memory-efficient GPU work, use line monitors and
 ``is_include_history=False``. Full-field histories remain device-resident until
