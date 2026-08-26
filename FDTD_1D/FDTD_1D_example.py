@@ -6,12 +6,17 @@ f_max = 100e9
 Nt = 5000
 
 sim = FDTD_1D(z_range=z_range, Nz=Nz, f_max=f_max, Nt=Nt)
-sim.add_material("dielectric", epsilon_r=3.0, sigma_e=1)
-sim.add_material("magnetic", mu_r=3.0, sigma_m=0.0)
-sim.add_object(material="dielectric", region=(3e-3, 5e-3))
-sim.add_object(material="magnetic", region=(5e-3, 7e-3))
-sim.add_object(material="vacuum", region=(7e-3, 10e-3))
-sim.add_object(material="magnetic", region=(10e-3, 20e-3))
+material = sim.add_material(
+    "multipole",
+    epsilon_r=(2.0, 2.2, 2.4),
+    sigma_e=1e-3,
+    debye=[
+        {"delta_epsilon": (1.0, 1.1, 1.2), "tau": 10e-12},
+        {"delta_epsilon": 0.3, "tau": 40e-12},
+    ],
+)
+
+sim.add_object(material="multipole", region=(5e-3, 15e-3))
 sim.set_boundary("absorbing", "absorbing")
 sim.add_source(src_position=2e-3, amplitude=1.0, is_show=True)
 sim.run()
