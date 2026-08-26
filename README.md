@@ -1,20 +1,20 @@
 # FDTD
 
-A research-oriented Python implementation of one-, two-, and three-dimensional
-finite-difference time-domain solvers on Yee-staggered grids.
+A research-oriented FDTD project with two deliberately separate solver
+families: general-purpose Cartesian electromagnetics and dedicated
+curved-spacetime light propagation. Both families have optional Cython and
+Numba-CUDA acceleration with portable NumPy fallbacks, but their physical
+models, coordinates, units, and APIs are different.
 
-The project supports named anisotropic materials, electric and magnetic loss,
-multipole Debye/Drude/Lorentz electric dispersion, native PEC/PMC geometry,
-CFS-CPML boundaries in 2D and 3D, multiple source types, field monitors, power
-spectra, and near-field-to-far-field transforms.
-Optional Cython and Numba-CUDA backends accelerate the main numerical work
-while retaining portable NumPy/Python fallbacks.
+## Choose a solver
 
-## Documentation
+### Conventional Cartesian material FDTD
 
-Start with [GENERAL.md](GENERAL.md) for installation, units, material
-conventions, stability guidance, backend selection, and the common workflow.
-Each active solver has its own detailed reference:
+These solvers model user-defined materials, geometry, sources, boundaries, and
+monitors in one, two, or three spatial dimensions. They use SI units and
+Cartesian Yee grids, with support for anisotropy, electric and magnetic loss,
+Debye/Drude/Lorentz dispersion, PEC/PMC geometry, CFS-CPML, power spectra, and
+near-field-to-far-field transforms.
 
 | Solver | Polarization and fields | Documentation |
 |---|---|---|
@@ -23,10 +23,19 @@ Each active solver has its own detailed reference:
 | 2D TEz | `Hz`, `Ex`, `Ey` | [FDTD_2D_Hz/README.rst](FDTD_2D_Hz/README.rst) |
 | 3D | `Ex`, `Ey`, `Ez`, `Hx`, `Hy`, `Hz` | [FDTD_3D/README.rst](FDTD_3D/README.rst) |
 
-The supplied CPML and scattering-analysis literature is indexed in
-[doc/README.md](doc/README.md).
+### Schwarzschild curved-spacetime light solver
 
-## Quick start
+`FDTD_2D_GR` is a purpose-built polar TE solver for light on the equatorial
+plane of a fixed, non-rotating Schwarzschild black hole. It uses geometric
+units (`G=c=1`), evolves `Er`, `Ephi`, and `Hz` through the prescribed GR
+optical medium, and has its own orbiting-packet, radial-sponge, diagnostics,
+and animation API. It does not use the Cartesian material/geometry/source
+workflow above. See [FDTD_2D_GR/README.rst](FDTD_2D_GR/README.rst) for its
+physical scope and limitations.
+
+## Quick starts
+
+### Conventional Cartesian example
 
 ```python
 from FDTD_3D import FDTD_3D
@@ -48,7 +57,7 @@ sim.run(record_stride=2)
 sim.plot_plane_monitor(monitor, component="Ex", time_index=-1)
 ```
 
-All solvers follow the same material-first pattern:
+The Cartesian solvers follow the same material-first pattern:
 
 ```python
 material = sim.add_material(
@@ -81,6 +90,29 @@ second; `tau` is in seconds. Pole parameters can also be Cartesian triples.
 
 `vacuum`, `PEC`, and `PMC` are predefined.
 
+### Schwarzschild GR example
+
+```python
+from FDTD_2D_GR import FDTD_2D_GR
+
+sim = FDTD_2D_GR(
+    rho_min=0.55, rho_max=10.0, Nr=320, Nphi=640,
+).config("cpu")
+sim.initialize_orbiting_packet(
+    azimuthal_mode=20, radial_width=0.35, angular_width=0.32,
+)
+history = sim.run(
+    duration=0.5 * sim.photon_orbit_period,
+    record_stride=8,
+)
+sim.plot_snapshot(log_scale=True)
+sim.plot_diagnostics(history)
+```
+
+This is fixed-background Schwarzschild wave propagation rather than a material
+scattering model. The finite packet follows the unstable photon-orbit region
+before separating into captured and escaping components.
+
 ## Build optional Cython kernels
 
 From the project root:
@@ -90,9 +122,11 @@ python setup_cython.py build_ext --inplace
 ```
 
 The build requires Cython, NumPy, setuptools, and a supported C compiler.
-The 2D and 3D GPU backends additionally require Numba and a working CUDA
-runtime. Select them with `sim.config("gpu")`; if CUDA is unavailable, the
-solver warns and falls back to its Python/NumPy implementation.
+The Cartesian 2D/3D solvers and the Schwarzschild solver have Numba-CUDA
+backends that additionally require a working CUDA runtime. Select one with
+`sim.config("gpu")`; if CUDA is unavailable, the solver warns and falls back
+to its Python/NumPy implementation. Backend details differ by solver; notably,
+the current GR Cython kernel is specialized for complex128 fields.
 
 ## Run tests
 
@@ -105,6 +139,8 @@ start directory also works when the test package is invoked from tools that do
 not recursively discover packages by default.
 
 ## Examples
+
+### Conventional Cartesian examples
 
 ```bash
 python FDTD_1D/FDTD_1D_example.py
@@ -121,6 +157,22 @@ directly. Use `--steps`, `--record-stride`, `--output-dir`, `--animate`, and
 
 The `FDTD_2D_Ez_Legacy` directory is retained for reference. New work should
 use `FDTD_2D_Ez` or `FDTD_2D_Hz`.
+
+### Schwarzschild GR example
+
+```bash
+python FDTD_2D_GR/Example_Photon_Orbit.py
+```
+
+This is a no-argument Python API script. Edit its constants directly;
+`BACKEND` selects NumPy, Cython, or CUDA, and `SAVE_ANIMATION = True` writes
+`photon_packet.mp4` with FFmpeg after the simulation finishes.
+
+## Further documentation
+
+Start with [GENERAL.md](GENERAL.md) for installation, units, stability,
+backend selection, and conventions shared where applicable. The supplied CPML
+and scattering-analysis literature is indexed in [doc/README.md](doc/README.md).
 
 ## License
 

@@ -6,8 +6,8 @@ complete method examples.
 
 ## Coordinate system and units
 
-- Geometry and grid lengths are in metres.
-- Frequencies are in hertz and time values are in seconds.
+- General-purpose solver geometry and grid lengths are in metres.
+- General-purpose solver frequencies are in hertz and time values are in seconds.
 - `epsilon_r` and `mu_r` are relative, dimensionless constitutive values.
 - `sigma_e` is electric conductivity in S/m.
 - `sigma_m` is the magnetic-conductivity coefficient used by the symmetric
@@ -17,14 +17,21 @@ complete method examples.
 - Integer geometry coordinates generally mean grid indices; floating-point
   coordinates mean physical positions in metres.
 
-All active solvers use Cartesian Yee staggering. Electric and magnetic
-components therefore do not occupy the same spatial positions.
+The dedicated Schwarzschild solver is the exception: `FDTD_2D_GR` uses
+geometric units with `G=c=1`, a polar `(rho, phi)` mesh, and the black-hole
+mass length `M` as its natural scale. Its conversion helpers map results to
+SI for a chosen physical mass. See `FDTD_2D_GR/README.rst`.
+
+The general-purpose solvers use Cartesian Yee staggering. Electric and magnetic
+components therefore do not occupy the same spatial positions.  The GR solver
+uses the corresponding integral polar Yee staggering.
 
 | Solver | Electric components | Magnetic components |
 |---|---|---|
 | 1D | `Ey (Nz+1)` | `Hx (Nz)` |
 | 2D TMz | `Ez (Nx+1, Ny+1)` | `Hx (Nx+1, Ny)`, `Hy (Nx, Ny+1)` |
 | 2D TEz | `Ex (Nx, Ny+1)`, `Ey (Nx+1, Ny)` | `Hz (Nx, Ny)` |
+| 2D Schwarzschild TEz | `Er (Nr, Nphi)`, `Ephi (Nr+1, Nphi)` | `Hz (Nr, Nphi)` |
 | 3D | `Ex (Nx, Ny+1, Nz+1)`, `Ey (Nx+1, Ny, Nz+1)`, `Ez (Nx+1, Ny+1, Nz)` | `Hx (Nx+1, Ny, Nz)`, `Hy (Nx, Ny+1, Nz)`, `Hz (Nx, Ny, Nz+1)` |
 
 ## Installation and dependencies
@@ -221,7 +228,7 @@ remain several cells inside the PML interface.
 ## Backends
 
 - 1D: compiled Cython field updates when available, otherwise Python loops.
-- 2D: `config("cpu")` selects Cython curl kernels when built;
+- 2D Cartesian: `config("cpu")` selects Cython curl kernels when built;
   `config("gpu")` selects the persistent Numba-CUDA runtime when available;
   `config("python")` forces the reference implementation. The GPU runtime
   uploads fields, coefficients, CPML state, masks, and sparse source metadata
@@ -229,6 +236,11 @@ remain several cells inside the PML interface.
   sources, monitor sampling, and optional history recording then remain on the
   device for the complete time loop. Final fields and requested output buffers
   are copied back after the run, with no host-device transfers per time step.
+- 2D Schwarzschild: the same three selectors choose its NumPy reference,
+  complex128 Cython whole-step kernel, or Numba-CUDA kernel. The GPU backend
+  keeps `Er`, `Ephi`, `Hz`, metric coefficients, and sponge profiles resident;
+  host copies occur only for requested history/diagnostic samples, explicit
+  `sync_fields()`, or the final state returned by `run()`.
 - 3D: `config("cpu")` selects the compiled whole-run Cython loop when built;
   `config("gpu")` selects a persistent Numba-CUDA loop, and `config("python")`
   uses the NumPy reference implementation. The GPU path uploads the six Yee

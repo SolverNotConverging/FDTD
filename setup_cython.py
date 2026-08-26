@@ -16,6 +16,8 @@ extensions = [
               include_dirs=[np.get_include()]),
     Extension("FDTD_2D_Hz._cython_kernel_hz", [str(ROOT / "FDTD_2D_Hz" / "cython_kernel_hz.pyx")],
               include_dirs=[np.get_include()]),
+    Extension("FDTD_2D_GR._cython_kernel_gr", [str(ROOT / "FDTD_2D_GR" / "cython_kernel_gr.pyx")],
+              include_dirs=[np.get_include()]),
     Extension("FDTD_3D._cython_kernel_3d", [str(ROOT / "FDTD_3D" / "cython_kernel_3d.pyx")],
               include_dirs=[np.get_include()]),
 ]
@@ -23,7 +25,14 @@ extensions = [
 setup(
     name="fdtd-cython-kernels",
     version="0.3.0",
-    packages=["FDTD_common", "FDTD_1D", "FDTD_2D_Ez", "FDTD_2D_Hz", "FDTD_3D"],
+    packages=[
+        "FDTD_common",
+        "FDTD_1D",
+        "FDTD_2D_Ez",
+        "FDTD_2D_Hz",
+        "FDTD_2D_GR",
+        "FDTD_3D",
+    ],
     ext_modules=cythonize(extensions, language_level=3,
                           build_dir=str(ROOT / "build" / "cython")),
 )
