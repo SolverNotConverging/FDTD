@@ -1,10 +1,11 @@
 # FDTD
 
-A research-oriented FDTD project with two deliberately separate solver
-families: general-purpose Cartesian electromagnetics and dedicated
-curved-spacetime light propagation. Both families have optional Cython and
-Numba-CUDA acceleration with portable NumPy fallbacks, but their physical
-models, coordinates, units, and APIs are different.
+Finite-Difference Time-Domain solvers for computational electromagnetics.
+This project has two deliberately separate solver families: general-purpose 
+Cartesian electromagnetics and dedicated curved-spacetime light propagation. 
+Both families have optional Cython and Numba-CUDA acceleration with portable
+NumPy fallbacks, but their physical models, coordinates, units, and APIs are 
+different.
 
 ## Choose a solver
 
