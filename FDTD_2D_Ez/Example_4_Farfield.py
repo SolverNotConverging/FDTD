@@ -6,7 +6,7 @@ f_min = 80e9
 f_max = 120e9
 
 sim = FDTD_2D_Ez(x_range=14e-3, y_range=14e-3, Nx=140, Ny=140, f_min=f_min, f_max=f_max, Nt=4000)
-sim.config(backend='cpu')
+sim.config(backend='gpu')
 sim.periodic = ''
 sim.add_PML(pml_width=20, direction='xy')
 
@@ -21,7 +21,7 @@ sim.add_line_monitor(x=(21, 119), y=21, index=20)   # bottom
 sim.add_line_monitor(y=(21, 119), x=21, index=30)   # left
 sim.add_line_monitor(y=(21, 119), x=119, index=40)  # right
 
-sim.run(record_stride=4, is_include_history=True)
+sim.run(record_stride=4, is_include_history=True, progress=True)
 
 # Save for later
 sim.save("fdtd_run.pkl", include_histories=True)

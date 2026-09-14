@@ -1,3 +1,4 @@
+from FDTD_common.runtime_2d import select_backend, reference_substep, run as run_compiled
 import numpy as np
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
@@ -17,19 +18,6 @@ from FDTD_common.broadband import (
     synthesize_modal_drives,
     validate_frequency_mode_pairs,
 )
-
-try:
-    from . import _cython_kernel_ez as _cython_kernel
-except (ImportError, ValueError):
-    try:
-        import _cython_kernel_ez as _cython_kernel
-    except ImportError:
-        _cython_kernel = None
-
-try:
-    from numba import cuda as _numba_cuda
-except ImportError:
-    _numba_cuda = None
 
 
 class FDTD_2D_Ez:
@@ -235,9 +223,7 @@ class FDTD_2D_Ez:
         self.monitors = []
         self.monitor_results = []
 
-        self._cython_kernel = _cython_kernel
-        self._cuda_kernels = None
-        self.config("cpu")
+        select_backend(self, "cpu", validate=False)
 
     @staticmethod
     def _to_x_faces(cell_values):
@@ -380,35 +366,9 @@ class FDTD_2D_Ez:
         return None, er[2], mr[0], mr[1], se[2], sm[0], sm[1]
 
     def config(self, backend="cpu"):
-        """Select ``cpu`` (Cython) or ``gpu`` (Numba-CUDA), with Python fallback."""
-        requested = str(backend).lower().replace("-", "_")
-        if requested not in {"cpu", "gpu", "python"}:
-            raise ValueError("backend must be 'cpu', 'gpu', or 'python'.")
-        self.backend_requested = requested
-        if requested == "cpu":
-            self.backend = "cython" if self._cython_kernel is not None else "python"
-        elif requested == "gpu":
-            available = _numba_cuda is not None
-            if available:
-                try:
-                    available = bool(_numba_cuda.is_available())
-                except Exception:
-                    available = False
-            if available:
-                self.backend = "numba_cuda"
-                self._init_cuda_kernels()
-            else:
-                self.backend = "python"
-                warnings.warn("Numba-CUDA is unavailable; using Python update loops.", RuntimeWarning)
-        else:
-            self.backend = "python"
-        self._use_cython_kernel = self.backend == "cython"
-        self._use_numba_cuda = self.backend == "numba_cuda"
-        return self
+        """Select a strict compiled backend, or explicit Python reference."""
+        return select_backend(self, backend)
 
-    @staticmethod
-    def _cython_compatible(*arrays):
-        return all(array.dtype == np.float64 and array.flags.c_contiguous for array in arrays)
 
     @staticmethod
     def _parse_special_material(ER=None, MR=None, material=None):
@@ -1644,60 +1604,12 @@ class FDTD_2D_Ez:
         """Convenience wrapper for averaging with the neighbour at index +1."""
         return self._avg_with_neighbor(arr, axis, periodic, direction=+1)
 
-    def _init_cuda_kernels(self):
-        if self._cuda_kernels is not None:
-            return
-        cuda = _numba_cuda
-
-        @cuda.jit
-        def curl_e(ez, d_ez_y, d_ez_x, dx, dy, periodic_x, periodic_y):
-            i, j = cuda.grid(2)
-            if i < d_ez_y.shape[0] and j < d_ez_y.shape[1]:
-                d_ez_y[i, j] = (ez[i, j + 1] - ez[i, j]) / dy
-            if i < d_ez_x.shape[0] and j < d_ez_x.shape[1]:
-                d_ez_x[i, j] = (ez[i + 1, j] - ez[i, j]) / dx
-
-        @cuda.jit
-        def curl_h(hx, hy, d_hx_y, d_hy_x, dx, dy, periodic_x, periodic_y):
-            i, j = cuda.grid(2)
-            nx = d_hx_y.shape[0] - 1
-            ny = d_hx_y.shape[1] - 1
-            if i <= nx and j <= ny:
-                if j == 0:
-                    d_hx_y[i, j] = ((hx[i, 0] - hx[i, ny - 1]) if periodic_y else hx[i, 0]) / dy
-                elif j == ny:
-                    d_hx_y[i, j] = ((hx[i, 0] - hx[i, ny - 1]) if periodic_y else -hx[i, ny - 1]) / dy
-                else:
-                    d_hx_y[i, j] = (hx[i, j] - hx[i, j - 1]) / dy
-                if i == 0:
-                    d_hy_x[i, j] = ((hy[0, j] - hy[nx - 1, j]) if periodic_x else hy[0, j]) / dx
-                elif i == nx:
-                    d_hy_x[i, j] = ((hy[0, j] - hy[nx - 1, j]) if periodic_x else -hy[nx - 1, j]) / dx
-                else:
-                    d_hy_x[i, j] = (hy[i, j] - hy[i - 1, j]) / dx
-
-        self._cuda_kernels = (curl_e, curl_h)
 
     # ---------- spatial curls ----------
     def calculate_Curl_E(self):
+        reference_substep(self)
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
         per_y = hasattr(self, "periodic") and ('y' in self.periodic)
-        if self.backend == "cython" and self._cython_compatible(
-                self.Ez, self.d_Ez_y, self.d_Ez_x):
-            self._cython_kernel.curl_e(self.Ez, self.d_Ez_y, self.d_Ez_x,
-                                       self.dx, self.dy, per_x, per_y)
-            return
-        if (self.backend == "numba_cuda"
-                and not getattr(self, "_ade_cuda_host_fallback", False)):
-            ez_d = _numba_cuda.to_device(self.Ez)
-            dey_d = _numba_cuda.device_array_like(self.d_Ez_y)
-            dex_d = _numba_cuda.device_array_like(self.d_Ez_x)
-            threads = (16, 16)
-            blocks = ((self.Nx + 16) // 16, (self.Ny + 16) // 16)
-            self._cuda_kernels[0][blocks, threads](ez_d, dey_d, dex_d, self.dx, self.dy, per_x, per_y)
-            dey_d.copy_to_host(self.d_Ez_y)
-            dex_d.copy_to_host(self.d_Ez_x)
-            return
 
         for i in range(self.Nx + 1):
             for j in range(self.Ny):
@@ -1707,10 +1619,12 @@ class FDTD_2D_Ez:
                 self.d_Ez_x[i, j] = (self.Ez[i + 1, j] - self.Ez[i, j]) / self.dx
 
     def calcualte_Psi_B(self):
+        reference_substep(self)
         self.Psi_Bx_y = self.b_Bx_y * self.Psi_Bx_y + self.c_Bx_y * self.d_Ez_y
         self.Psi_By_x = self.b_By_x * self.Psi_By_x + self.c_By_x * self.d_Ez_x
 
     def update_B(self):
+        reference_substep(self)
         self.Hx = self.CaHx * self.Hx - self.CbHx * (
                 self.d_Ez_y / self.kappa_y_Hx + self.Psi_Bx_y)
         self.Hy = self.CaHy * self.Hy + self.CbHy * (
@@ -1719,6 +1633,7 @@ class FDTD_2D_Ez:
         self.By = self.MRyy_Hy * self.Hy
 
     def update_H(self):
+        reference_substep(self)
         self.Bx[self.PMC_Hx] = 0.0
         self.By[self.PMC_Hy] = 0.0
         self.Hx = self.Bx / self.MRxx_Hx
@@ -1727,26 +1642,9 @@ class FDTD_2D_Ez:
         self.Hy[self.PMC_Hy] = 0.0
 
     def calculate_Curl_H(self):
+        reference_substep(self)
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
         per_y = hasattr(self, "periodic") and ('y' in self.periodic)
-        if self.backend == "cython" and self._cython_compatible(
-                self.Hx, self.Hy, self.d_Hx_y, self.d_Hy_x):
-            self._cython_kernel.curl_h(self.Hx, self.Hy, self.d_Hx_y, self.d_Hy_x,
-                                       self.dx, self.dy, per_x, per_y)
-            return
-        if (self.backend == "numba_cuda"
-                and not getattr(self, "_ade_cuda_host_fallback", False)):
-            hx_d = _numba_cuda.to_device(self.Hx)
-            hy_d = _numba_cuda.to_device(self.Hy)
-            dhxy_d = _numba_cuda.device_array_like(self.d_Hx_y)
-            dhyx_d = _numba_cuda.device_array_like(self.d_Hy_x)
-            threads = (16, 16)
-            blocks = ((self.Nx + 16) // 16, (self.Ny + 16) // 16)
-            self._cuda_kernels[1][blocks, threads](hx_d, hy_d, dhxy_d, dhyx_d,
-                                                   self.dx, self.dy, per_x, per_y)
-            dhxy_d.copy_to_host(self.d_Hx_y)
-            dhyx_d.copy_to_host(self.d_Hy_x)
-            return
         for i in range(self.Nx + 1):
             for j in range(self.Ny + 1):
                 if j == 0:
@@ -1763,10 +1661,12 @@ class FDTD_2D_Ez:
                     self.d_Hy_x[i, j] = (self.Hy[i, j] - self.Hy[i - 1, j]) / self.dx
 
     def calcualte_Psi_D(self):
+        reference_substep(self)
         self.Psi_Dz_x = self.b_Dz_x * self.Psi_Dz_x + self.c_Dz_x * self.d_Hy_x
         self.Psi_Dz_y = self.b_Dz_y * self.Psi_Dz_y + self.c_Dz_y * self.d_Hx_y
 
     def update_D(self, finalize=True):
+        reference_substep(self)
         if self._ade_dirty:
             self._init_Coeff()
         curl = (self.d_Hy_x / self.kappa_x_Ez
@@ -1788,6 +1688,7 @@ class FDTD_2D_Ez:
             self.update_E()
 
     def update_E(self):
+        reference_substep(self)
         if self.has_dispersion:
             state_changed = self._ade_dirty or self._ade_Ez is None
             if state_changed:
@@ -1819,19 +1720,13 @@ class FDTD_2D_Ez:
 
     # ---------- main loop ----------
 
-    def run(self, record_stride=1, is_include_history=True):
-        self._ade_cuda_host_fallback = bool(
-            self.backend == "numba_cuda" and self.has_dispersion)
-        if self.backend == "numba_cuda" and not self.has_dispersion:
-            from FDTD_common.cuda_2d import run_tm
-            run_tm(self, record_stride=record_stride,
-                   is_include_history=is_include_history)
+    def run(self, record_stride=1, is_include_history=True, *, progress=False):
+        """Run the simulation; progress=True shows throttled terminal step progress."""
+        if self.backend != "python":
+            run_compiled(self, "tm", record_stride, is_include_history, progress=progress)
             return
-        if self._ade_cuda_host_fallback:
-            warnings.warn(
-                "The resident CUDA TMz loop does not yet support dispersive "
-                "ADE materials; using host update loops for this run.",
-                RuntimeWarning)
+        if int(record_stride) != record_stride or record_stride < 1:
+            raise ValueError("record_stride must be a positive integer.")
         self._init_Coeff()
         self.is_include_history = is_include_history
         Nx, Ny = self.Nx, self.Ny
@@ -1899,7 +1794,8 @@ class FDTD_2D_Ez:
 
             monitor_results.append(buf)
 
-        for t_index in tqdm(range(self.Nt), desc="FDTD simulation", unit="step"):
+        for t_index in tqdm(range(self.Nt), desc="FDTD simulation", unit="step",
+                            disable=not progress, mininterval=0.2):
             # E-curl
             self.calculate_Curl_E()
 
@@ -3174,9 +3070,7 @@ class FDTD_2D_Ez:
         self.__dict__.update(state)
         self._ensure_material_state()
         self._ensure_conductor_state()
-        self._cython_kernel = _cython_kernel
-        self._cuda_kernels = None
-        self.config(getattr(self, "backend_requested", "cpu"))
+        select_backend(self, getattr(self, "backend_requested", "cpu"), validate=False)
 
     def save(self, path: str, include_histories: bool = True):
         """Save the full simulator state to *path* using pickle.
@@ -3193,7 +3087,9 @@ class FDTD_2D_Ez:
         if not include_histories:
             for k in ("Hx_history", "Hy_history", "Ez_history", "Dz_history"):
                 if k in state:
-                    state[k] = type(state[k])()  # empty like its type
+                    value = state[k]
+                    state[k] = (np.empty((0,) + value.shape[1:], dtype=value.dtype)
+                                if isinstance(value, np.ndarray) else type(value)())
 
         # Write atomically: write to .part then replace
         import tempfile, os, pickle
@@ -3225,9 +3121,7 @@ class FDTD_2D_Ez:
         sim.__dict__.update(state)
         sim._ensure_material_state()
         sim._ensure_conductor_state()
-        sim._cython_kernel = _cython_kernel
-        sim._cuda_kernels = None
-        sim.config(getattr(sim, "backend_requested", "cpu"))
+        select_backend(sim, getattr(sim, "backend_requested", "cpu"), validate=False)
         return sim
 
     @classmethod

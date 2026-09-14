@@ -1,4 +1,6 @@
-"""Run the unified TEz solver with its Numba-CUDA backend."""
+"""Build with `python setup_cython.py build_ext --inplace` first.
+
+Run the unified TEz solver with its Numba-CUDA backend."""
 
 from FDTD_2D_Hz import FDTD_2D_Hz
 
@@ -29,6 +31,9 @@ sim.add_source('point', x=2.5e-3, y=2.0e-3, amplitude=2.5)
 # Line source feeding a vertical segment to excite more modes
 sim.add_source('line-soft', x=6.0e-3, y=(2.0e-3, 5.0e-3), amplitude=1.0)
 
-sim.run(record_stride=5)
+# Histories stay in GPU memory until completion. Increase this stride
+# for larger grids, or set is_include_history=False for monitor-only runs.
+sim.run(record_stride=5, progress=True)
+print(sim._runtime_stats)
 
 sim.show_animation(fps=120, dynamic_clim=False)

@@ -3,9 +3,10 @@
 Finite-Difference Time-Domain solvers for computational electromagnetics.
 This project has two deliberately separate solver families: general-purpose 
 Cartesian electromagnetics and dedicated curved-spacetime light propagation. 
-Both families have optional Cython and Numba-CUDA acceleration with portable
-NumPy fallbacks, but their physical models, coordinates, units, and APIs are 
-different.
+Both families provide Cython and Numba-CUDA acceleration and a portable NumPy
+reference. Cartesian 2D acceleration is strict: explicitly select the reference
+when compiled execution is unavailable. The families' physical models,
+coordinates, units, and APIs are different.
 
 ## Choose a solver
 
@@ -125,9 +126,17 @@ python setup_cython.py build_ext --inplace
 The build requires Cython, NumPy, setuptools, and a supported C compiler.
 The Cartesian 2D/3D solvers and the Schwarzschild solver have Numba-CUDA
 backends that additionally require a working CUDA runtime. Select one with
-`sim.config("gpu")`; if CUDA is unavailable, the solver warns and falls back
-to its Python/NumPy implementation. Backend details differ by solver; notably,
-the current GR Cython kernel is specialized for complex128 fields.
+`sim.config("gpu")`. Cartesian Ez/Hz runs require the full Cython extension for
+both CPU stepping and GPU graph replay; missing acceleration raises an error.
+`config("python")` selects their reference loops explicitly. Other solver
+families retain their existing fallback behavior. The GR Cython kernel is
+specialized for complex128 fields.
+
+Ez/Hz CPU runs execute the entire time loop in Cython under `nogil`. Their GPU
+runs execute Numba CUDA kernels through native CUDA graph replay, including
+Debye/Drude/Lorentz dispersion, sources, PML, monitors, and histories. No Python
+dispatch, buffer allocation, or host/device transfer occurs during accelerated
+stepping. See [the compiled 2D runtime guide](doc/compiled_2d.md).
 
 ## Run tests
 
@@ -138,6 +147,9 @@ python -m unittest discover -s tests -v
 All unit and CUDA-simulator tests live under [`tests/`](tests/). The explicit
 start directory also works when the test package is invoked from tools that do
 not recursively discover packages by default.
+
+Build the extensions before testing accelerated 2D execution. Set
+`FDTD_TEST_REAL_CUDA=1` to include real-GPU graph, transfer, and cleanup tests.
 
 ## Examples
 

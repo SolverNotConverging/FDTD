@@ -213,12 +213,13 @@ outside all scatterers and inside the PML.
 Run, animation, and persistence
 -------------------------------
 
-``run`` displays tqdm progress. Set ``is_include_history=False`` when full
+``run(progress=True)`` enables a throttled terminal progress bar (native for
+CPU/GPU execution). Progress is off by default. Set ``is_include_history=False`` when full
 field animation history is unnecessary. Otherwise:
 
 .. code-block:: python
 
-   sim.run(record_stride=2)
+   sim.run(record_stride=2, progress=True)
    sim.show_animation(fps=60, dynamic_clim=True)
 
 The full simulator state can be saved and restored with pickle:
@@ -234,25 +235,28 @@ so a restored dispersive run continues from the saved constitutive state.
 Backends
 --------
 
-``config("cpu")`` uses Cython curl kernels when built and otherwise falls back
-to Python. ``config("gpu")`` uses a persistent Numba-CUDA runtime when
-available. It uploads simulation state once, advances curl, CFS-CPML, lossy
-material updates, conductor masks, sparse sources, monitor gathering, and
-optional history recording on the device, and copies final/output arrays back
-after the run. There are no host-device transfers inside the GPU time loop.
-``config("python")`` forces the reference loops.
+``config("cpu")`` runs the complete time loop in Cython under ``nogil``.
+``config("gpu")`` runs Numba CUDA kernels through a Cython CUDA graph driver.
+Both accelerated backends include Debye/Drude/Lorentz dispersion, CPML, lossy
+materials, conductor masks, all supported sources, monitors, and histories.
+No Python dispatch or allocation occurs during accelerated stepping, and GPU
+arrays remain resident until completion with no host/device transfers.
 
-Dispersive runs retain the Cython curl kernels when available. Because the
-resident CUDA loop does not yet store ADE histories, requesting ``gpu`` with a
-dispersive material emits a warning and uses the host update loop for that run.
-The device-resident behavior above is unchanged for nondispersive materials.
+Build the extension with ``python setup_cython.py build_ext --inplace``.
+Unavailable acceleration raises an error; ``config("python")`` explicitly
+selects the NumPy reference. Individual curl/update methods require reference
+mode. Construction and checkpoint loading remain available without a build.
 
-For memory-efficient GPU work, use line monitors and
-``is_include_history=False``. Full-field histories remain device-resident until
-the run completes and therefore must fit in GPU memory; increase
-``record_stride`` to reduce their size. After a GPU run,
-``_gpu_transfer_stats`` reports the number of compiled source events and
-monitor points and confirms that per-step transfer counts are zero.
+Use ``is_include_history=False`` with line monitors when memory is limited.
+Full histories and source tables must fit in GPU memory; preflight reports
+oversized requests before advancing fields. Increase ``record_stride`` or
+reduce monitor windows to use less memory. There is no automatic streaming.
+
+``_runtime_stats`` reports setup, stepping, download, and post-processing time.
+``_gpu_transfer_stats`` reports measured runtime operations and recording size.
+The CUDA simulator is a correctness harness and reports its Python launches;
+real CUDA graph replay uses no Python timestep calls. See
+``doc/compiled_2d.md`` for architecture, tests, and benchmark instructions.
 
 Examples
 --------

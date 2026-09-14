@@ -228,20 +228,5 @@ class TestTEzADEUpdate(unittest.TestCase):
         np.testing.assert_array_equal(sim.Ex, expected_ex)
         np.testing.assert_array_equal(sim.Ey, expected_ey)
 
-    def test_dispersive_resident_cuda_selection_warns_and_runs_on_host(self):
-        sim = make_sim(2, 2)
-        sim.Nt = 1
-        add_full_dispersive_material(sim)
-        # Exercise backend routing without requiring a CUDA driver: the ADE
-        # decision must happen before importing or launching the resident loop.
-        sim.backend = "numba_cuda"
-        sim._use_numba_cuda = True
-        with self.assertWarnsRegex(RuntimeWarning, "host update loops"):
-            sim.run(is_include_history=False)
-        self.assertTrue(sim._ade_cuda_host_fallback)
-        self.assertTrue(np.isfinite(sim.Ex).all())
-        self.assertTrue(np.isfinite(sim.Ey).all())
-
-
 if __name__ == "__main__":
     unittest.main()

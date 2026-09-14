@@ -195,17 +195,18 @@ class TestBackends(unittest.TestCase):
             getattr(py, field)[:] = values
             getattr(accelerated, field)[:] = values
 
-        py.calculate_Curl_E()
-        accelerated.calculate_Curl_E()
-        py.calculate_Curl_H()
-        accelerated.calculate_Curl_H()
-        for derivative in derivatives:
+        py.run(is_include_history=False)
+        accelerated.run(is_include_history=False)
+        for derivative in (*fields, *derivatives):
             np.testing.assert_allclose(getattr(accelerated, derivative), getattr(py, derivative))
         return accelerated.backend
 
     def test_cython_matches_python(self):
-        if not FDTD_2D_Ez(1, 1, 2, 2, 1, 1)._use_cython_kernel:
-            self.skipTest("optional Cython extensions are not built")
+        from FDTD_common.runtime_2d import compiled_extension
+        try:
+            compiled_extension()
+        except RuntimeError:
+            self.skipTest("full 2D Cython extension is not built")
         self.assertEqual(self._compare(
             FDTD_2D_Ez, ("Ez", "Hx", "Hy"),
             ("d_Ez_y", "d_Ez_x", "d_Hx_y", "d_Hy_x"), "cpu"), "cython")
@@ -214,6 +215,15 @@ class TestBackends(unittest.TestCase):
             ("d_Ex_y", "d_Ey_x", "d_Hz_y", "d_Hz_x"), "cpu"), "cython")
 
     def test_numba_cuda_matches_python_when_available(self):
+        from FDTD_common.runtime_2d import compiled_extension
+        try:
+            compiled_extension()
+            from numba import cuda
+            available = cuda.is_available()
+        except (ImportError, RuntimeError):
+            available = False
+        if not available:
+            self.skipTest("full 2D CUDA runtime is unavailable")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             backend = self._compare(

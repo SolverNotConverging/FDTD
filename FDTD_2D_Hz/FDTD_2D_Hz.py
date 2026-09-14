@@ -1,3 +1,4 @@
+from FDTD_common.runtime_2d import select_backend, reference_substep, run as run_compiled
 import numpy as np
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
@@ -16,19 +17,6 @@ from FDTD_common.broadband import (
     synthesize_modal_drives,
     validate_frequency_mode_pairs,
 )
-
-try:
-    from . import _cython_kernel_hz as _cython_kernel
-except (ImportError, ValueError):
-    try:
-        import _cython_kernel_hz as _cython_kernel
-    except ImportError:
-        _cython_kernel = None
-
-try:
-    from numba import cuda as _numba_cuda
-except ImportError:
-    _numba_cuda = None
 
 
 class FDTD_2D_Hz:
@@ -240,9 +228,7 @@ class FDTD_2D_Hz:
         self.monitors = []
         self.monitor_results = []
 
-        self._cython_kernel = _cython_kernel
-        self._cuda_kernels = None
-        self.config("cpu")
+        select_backend(self, "cpu", validate=False)
 
     @staticmethod
     def _to_x_faces(cell_values):
@@ -408,35 +394,9 @@ class FDTD_2D_Hz:
         self._ade_last_Dy = self.Dy.copy()
 
     def config(self, backend="cpu"):
-        """Select ``cpu`` (Cython) or ``gpu`` (Numba-CUDA), with Python fallback."""
-        requested = str(backend).lower().replace("-", "_")
-        if requested not in {"cpu", "gpu", "python"}:
-            raise ValueError("backend must be 'cpu', 'gpu', or 'python'.")
-        self.backend_requested = requested
-        if requested == "cpu":
-            self.backend = "cython" if self._cython_kernel is not None else "python"
-        elif requested == "gpu":
-            available = _numba_cuda is not None
-            if available:
-                try:
-                    available = bool(_numba_cuda.is_available())
-                except Exception:
-                    available = False
-            if available:
-                self.backend = "numba_cuda"
-                self._init_cuda_kernels()
-            else:
-                self.backend = "python"
-                warnings.warn("Numba-CUDA is unavailable; using Python update loops.", RuntimeWarning)
-        else:
-            self.backend = "python"
-        self._use_cython_kernel = self.backend == "cython"
-        self._use_numba_cuda = self.backend == "numba_cuda"
-        return self
+        """Select a strict compiled backend, or explicit Python reference."""
+        return select_backend(self, backend)
 
-    @staticmethod
-    def _cython_compatible(*arrays):
-        return all(array.dtype == np.float64 and array.flags.c_contiguous for array in arrays)
 
     @staticmethod
     def _parse_special_material(ER=None, MR=None, material=None):
@@ -1649,97 +1609,37 @@ class FDTD_2D_Hz:
         """Convenience wrapper for averaging with the neighbour at index +1."""
         return self._avg_with_neighbor(arr, axis, periodic, direction=+1)
 
-    def _init_cuda_kernels(self):
-        if self._cuda_kernels is not None:
-            return
-        cuda = _numba_cuda
-
-        @cuda.jit
-        def curl_e(ex, ey, d_ex_y, d_ey_x, dx, dy):
-            i, j = cuda.grid(2)
-            if i < d_ex_y.shape[0] and j < d_ex_y.shape[1]:
-                d_ex_y[i, j] = (ex[i, j + 1] - ex[i, j]) / dy
-                d_ey_x[i, j] = (ey[i + 1, j] - ey[i, j]) / dx
-
-        @cuda.jit
-        def curl_h(hz, d_hz_y, d_hz_x, dx, dy, periodic_x, periodic_y):
-            i, j = cuda.grid(2)
-            nx, ny = hz.shape
-            if i < nx and j <= ny:
-                if j == 0:
-                    d_hz_y[i, j] = ((hz[i, 0] - hz[i, ny - 1]) if periodic_y else hz[i, 0]) / dy
-                elif j == ny:
-                    d_hz_y[i, j] = ((hz[i, 0] - hz[i, ny - 1]) if periodic_y else -hz[i, ny - 1]) / dy
-                else:
-                    d_hz_y[i, j] = (hz[i, j] - hz[i, j - 1]) / dy
-            if i <= nx and j < ny:
-                if i == 0:
-                    d_hz_x[i, j] = ((hz[0, j] - hz[nx - 1, j]) if periodic_x else hz[0, j]) / dx
-                elif i == nx:
-                    d_hz_x[i, j] = ((hz[0, j] - hz[nx - 1, j]) if periodic_x else -hz[nx - 1, j]) / dx
-                else:
-                    d_hz_x[i, j] = (hz[i, j] - hz[i - 1, j]) / dx
-
-        self._cuda_kernels = (curl_e, curl_h)
 
     # ---------- spatial curls ----------
     def calculate_Curl_E(self):
-        if self.backend == "cython" and self._cython_compatible(
-                self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x):
-            self._cython_kernel.curl_e(self.Ex, self.Ey, self.d_Ex_y, self.d_Ey_x, self.dx, self.dy)
-            return
-        if (self.backend == "numba_cuda"
-                and not getattr(self, "_ade_cuda_host_fallback", False)):
-            ex_d = _numba_cuda.to_device(self.Ex)
-            ey_d = _numba_cuda.to_device(self.Ey)
-            dexy_d = _numba_cuda.device_array_like(self.d_Ex_y)
-            deyx_d = _numba_cuda.device_array_like(self.d_Ey_x)
-            threads = (16, 16)
-            blocks = ((self.Nx + 15) // 16, (self.Ny + 15) // 16)
-            self._cuda_kernels[0][blocks, threads](ex_d, ey_d, dexy_d, deyx_d, self.dx, self.dy)
-            dexy_d.copy_to_host(self.d_Ex_y)
-            deyx_d.copy_to_host(self.d_Ey_x)
-            return
+        reference_substep(self)
         for i in range(self.Nx):
             for j in range(self.Ny):
                 self.d_Ex_y[i, j] = (self.Ex[i, j + 1] - self.Ex[i, j]) / self.dy
                 self.d_Ey_x[i, j] = (self.Ey[i + 1, j] - self.Ey[i, j]) / self.dx
 
     def calcualte_Psi_B(self):
+        reference_substep(self)
         self.Psi_Bz_x = self.b_Bz_x * self.Psi_Bz_x + self.c_Bz_x * self.d_Ey_x
         self.Psi_Bz_y = self.b_Bz_y * self.Psi_Bz_y + self.c_Bz_y * self.d_Ex_y
 
     def update_B(self):
+        reference_substep(self)
         self.Hz = self.CaHz * self.Hz - self.CbHz * (
                 self.d_Ey_x / self.kappa_x - self.d_Ex_y / self.kappa_y
                 + self.Psi_Bz_x - self.Psi_Bz_y)
         self.Bz = self.MRzz_Hz * self.Hz
 
     def update_H(self):
+        reference_substep(self)
         self.Bz[self.PMC_Hz] = 0.0
         self.Hz = self.Bz / self.MRzz_Hz
         self.Hz[self.PMC_Hz] = 0.0
 
     def calculate_Curl_H(self):
+        reference_substep(self)
         per_x = hasattr(self, "periodic") and ('x' in self.periodic)
         per_y = hasattr(self, "periodic") and ('y' in self.periodic)
-        if self.backend == "cython" and self._cython_compatible(
-                self.Hz, self.d_Hz_y, self.d_Hz_x):
-            self._cython_kernel.curl_h(self.Hz, self.d_Hz_y, self.d_Hz_x,
-                                       self.dx, self.dy, per_x, per_y)
-            return
-        if (self.backend == "numba_cuda"
-                and not getattr(self, "_ade_cuda_host_fallback", False)):
-            hz_d = _numba_cuda.to_device(self.Hz)
-            dhzy_d = _numba_cuda.device_array_like(self.d_Hz_y)
-            dhzx_d = _numba_cuda.device_array_like(self.d_Hz_x)
-            threads = (16, 16)
-            blocks = ((self.Nx + 16) // 16, (self.Ny + 16) // 16)
-            self._cuda_kernels[1][blocks, threads](hz_d, dhzy_d, dhzx_d,
-                                                   self.dx, self.dy, per_x, per_y)
-            dhzy_d.copy_to_host(self.d_Hz_y)
-            dhzx_d.copy_to_host(self.d_Hz_x)
-            return
         for i in range(self.Nx):
             for j in range(self.Ny + 1):
                 if j == 0:
@@ -1758,10 +1658,12 @@ class FDTD_2D_Hz:
                     self.d_Hz_x[i, j] = (self.Hz[i, j] - self.Hz[i - 1, j]) / self.dx
 
     def calcualte_Psi_D(self):
+        reference_substep(self)
         self.Psi_Dx_y = self.b_Dx_y * self.Psi_Dx_y + self.c_Dx_y * self.d_Hz_y
         self.Psi_Dy_x = self.b_Dy_x * self.Psi_Dy_x + self.c_Dy_x * self.d_Hz_x
 
     def update_D(self, finalize=True):
+        reference_substep(self)
         if self._ade_dirty:
             self._init_Coeff()
         curl_x = self.d_Hz_y / self.kappa_y_Ex + self.Psi_Dx_y
@@ -1785,6 +1687,7 @@ class FDTD_2D_Hz:
         self.Dy = self.ERyy_Ey * self.Ey
 
     def update_E(self):
+        reference_substep(self)
         self.Dx[self.PEC_Ex] = 0.0
         self.Dy[self.PEC_Ey] = 0.0
         if self._has_dispersion():
@@ -1823,21 +1726,13 @@ class FDTD_2D_Hz:
         self.Ey[self.PEC_Ey] = 0.0
 
     # ---------- main loop ----------
-    def run(self, record_stride=1, is_include_history=True):
-        has_dispersion = self._has_dispersion()
-        self._ade_cuda_host_fallback = bool(
-            self.backend == "numba_cuda" and has_dispersion)
-        if self.backend == "numba_cuda" and not has_dispersion:
-            from FDTD_common.cuda_2d import run_te
-            run_te(self, record_stride=record_stride,
-                   is_include_history=is_include_history)
+    def run(self, record_stride=1, is_include_history=True, *, progress=False):
+        """Run the simulation; progress=True shows throttled terminal step progress."""
+        if self.backend != "python":
+            run_compiled(self, "te", record_stride, is_include_history, progress=progress)
             return
-        if self._ade_cuda_host_fallback:
-            warnings.warn(
-                "The resident CUDA TEz loop does not yet support dispersive "
-                "ADE materials; using host update loops for this run.",
-                RuntimeWarning,
-            )
+        if int(record_stride) != record_stride or record_stride < 1:
+            raise ValueError("record_stride must be a positive integer.")
         self._init_Coeff()
         self.is_include_history = is_include_history
         Nx, Ny = self.Nx, self.Ny
@@ -1903,7 +1798,8 @@ class FDTD_2D_Hz:
 
             monitor_results.append(buf)
 
-        for t_index in tqdm(range(self.Nt), desc="FDTD simulation", unit="step"):
+        for t_index in tqdm(range(self.Nt), desc="FDTD simulation", unit="step",
+                            disable=not progress, mininterval=0.2):
             # E-curl
             self.calculate_Curl_E()
 
@@ -3149,9 +3045,7 @@ class FDTD_2D_Hz:
         self.__dict__.update(state)
         self._ensure_material_state()
         self._ensure_conductor_state()
-        self._cython_kernel = _cython_kernel
-        self._cuda_kernels = None
-        self.config(getattr(self, "backend_requested", "cpu"))
+        select_backend(self, getattr(self, "backend_requested", "cpu"), validate=False)
 
     def save(self, path: str, include_histories: bool = True):
         """Save the full simulator state to *path* using pickle.
@@ -3168,7 +3062,9 @@ class FDTD_2D_Hz:
         if not include_histories:
             for k in ("Ex_history", "Ey_history", "Hz_history"):
                 if k in state:
-                    state[k] = type(state[k])()  # empty like its type
+                    value = state[k]
+                    state[k] = (np.empty((0,) + value.shape[1:], dtype=value.dtype)
+                                if isinstance(value, np.ndarray) else type(value)())
 
         # Write atomically: write to .part then replace
         import tempfile, os, pickle
@@ -3200,9 +3096,7 @@ class FDTD_2D_Hz:
         sim.__dict__.update(state)
         sim._ensure_material_state()
         sim._ensure_conductor_state()
-        sim._cython_kernel = _cython_kernel
-        sim._cuda_kernels = None
-        sim.config(getattr(sim, "backend_requested", "cpu"))
+        select_backend(sim, getattr(sim, "backend_requested", "cpu"), validate=False)
         return sim
 
     @classmethod

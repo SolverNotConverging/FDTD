@@ -1,6 +1,7 @@
-"""Build all optional Cython curl kernels in place."""
+"""Build native FDTD runtimes and optional curl kernels in place."""
 
 from pathlib import Path
+import sys
 
 import numpy as np
 from Cython.Build import cythonize
@@ -10,6 +11,9 @@ from setuptools import Extension, setup
 ROOT = Path(__file__).resolve().parent
 
 extensions = [
+    Extension("FDTD_common._compiled_2d", [str(ROOT / "FDTD_common" / "compiled_2d.pyx")],
+              include_dirs=[np.get_include()],
+              libraries=[] if sys.platform == 'win32' else ['dl']),
     Extension("FDTD_1D._cython_kernel_1d", [str(ROOT / "FDTD_1D" / "cython_kernel_1d.pyx")],
               include_dirs=[np.get_include()]),
     Extension("FDTD_2D_Ez._cython_kernel_ez", [str(ROOT / "FDTD_2D_Ez" / "cython_kernel_ez.pyx")],

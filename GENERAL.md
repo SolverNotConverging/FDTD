@@ -50,8 +50,9 @@ Build all optional Cython extensions with:
 python setup_cython.py build_ext --inplace
 ```
 
-If an accelerated backend is unavailable, the solver falls back to its
-Python/NumPy implementation.
+Cartesian Ez/Hz acceleration requires the compiled extension and fails clearly
+if unavailable. Their `config("python")` reference remains usable without a
+build. Other solvers retain their existing Python/NumPy fallback behavior.
 
 ## Choosing the grid and time step
 
@@ -161,10 +162,9 @@ is area/volume averaged. Relaxation, collision, and resonance frequencies stay
 in separate dynamics channels, so overlapping materials with different poles
 are not collapsed into an unphysical averaged frequency.
 
-The ADE constitutive solve always uses the Python/NumPy path. In 1D, a built
-Cython kernel can still update H while ADE updates E. The 2D solvers can still
-use their Cython curl kernels, but a requested resident-CUDA run falls back to
-host updates with a warning. In 3D, a dispersive run requested through either
+Cartesian 2D ADE constitutive solves run entirely in Cython or Numba CUDA,
+including all polarization and velocity histories. In 1D, a built Cython kernel
+can still update H while NumPy ADE updates E. In 3D, a dispersive run requested through either
 the Cython or CUDA backend falls back to the NumPy time loop with a warning.
 Nondispersive accelerated behavior is unchanged.
 
@@ -228,14 +228,18 @@ remain several cells inside the PML interface.
 ## Backends
 
 - 1D: compiled Cython field updates when available, otherwise Python loops.
-- 2D Cartesian: `config("cpu")` selects Cython curl kernels when built;
-  `config("gpu")` selects the persistent Numba-CUDA runtime when available;
-  `config("python")` forces the reference implementation. The GPU runtime
+- 2D Cartesian: `config("cpu")` selects the complete Cython time loop;
+  `config("gpu")` selects Numba CUDA kernels with a native Cython graph driver;
+  `config("python")` explicitly selects the reference implementation. Both
+  accelerated choices require building the extension and never silently fall
+  back. Individual curl/update methods require reference mode. The GPU runtime
   uploads fields, coefficients, CPML state, masks, and sparse source metadata
   once before the run. Curl, CPML, lossy updates, conductor enforcement,
-  sources, monitor sampling, and optional history recording then remain on the
+  multipole ADE, sources, monitor sampling, and optional history recording then remain on the
   device for the complete time loop. Final fields and requested output buffers
-  are copied back after the run, with no host-device transfers per time step.
+  are copied back after the run, with no host-device transfers, allocations, or
+  Python dispatch per time step. Memory is checked before stepping; oversized
+  recording requests fail with a memory estimate. See [compiled 2D](doc/compiled_2d.md).
 - 2D Schwarzschild: the same three selectors choose its NumPy reference,
   complex128 Cython whole-step kernel, or Numba-CUDA kernel. The GPU backend
   keeps `Er`, `Ephi`, `Hz`, metric coefficients, and sponge profiles resident;
