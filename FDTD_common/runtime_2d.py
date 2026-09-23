@@ -11,6 +11,7 @@ from time import perf_counter
 import numpy as np
 
 from .packing_2d import _compile_tm_events, _compile_te_events, _source_parameters
+from .pec_cutcell import pack_enlarged_groups
 
 
 def compiled_extension():
@@ -196,15 +197,36 @@ def prepare(sim, polarization, record_stride, include_history):
 
     periodic_x = 'x' in getattr(sim, 'periodic', '')
     periodic_y = 'y' in getattr(sim, 'periodic', '')
+    cutcell = ()
+    if getattr(sim, '_has_cutcell', False):
+        if tm:
+            cutcell = (sim.pec_open_Hx, sim.pec_open_Hy,
+                       *pack_enlarged_groups(sim._pec_enlarged_Hx,
+                                             sim.pec_open_Hx, sim.MRxx_Hx),
+                       *pack_enlarged_groups(sim._pec_enlarged_Hy,
+                                             sim.pec_open_Hy, sim.MRyy_Hy))
+        else:
+            cutcell = (sim.pec_fluid_area, sim.pec_open_Ex, sim.pec_open_Ey,
+                       *pack_enlarged_groups(sim._pec_enlarged_groups,
+                                             sim.pec_fluid_area, sim.MRzz_Hz))
     if tm:
         hx_previous, hy_previous = sim.Hx.copy(), sim.Hy.copy()
         add('_tm_curl_e', (*arrays('Ez', 'd_Ez_y', 'd_Ez_x'), sim.dx, sim.dy))
+        if cutcell:
+            add('_cut_tm_curl_e', (*arrays('Ez', 'd_Ez_y', 'd_Ez_x'),
+                                   *cutcell[:2], sim.dx, sim.dy))
         inject(e, sim.d_Ez_y, sim.d_Ez_x)
         table(be, sim.d_Ez_y, sim.d_Ez_x)
         add('_tm_update_h', (*arrays('Hx', 'Hy', 'Bx', 'By'), hx_previous, hy_previous,
             *arrays('d_Ez_y', 'd_Ez_x', 'Psi_Bx_y', 'Psi_By_x',
                     'b_Bx_y', 'c_Bx_y', 'b_By_x', 'c_By_x', 'kappa_y_Hx', 'kappa_x_Hy',
                     'CaHx', 'CbHx', 'CaHy', 'CbHy', 'MRxx_Hx', 'MRyy_Hy', 'PMC_Hx', 'PMC_Hy')))
+        if cutcell:
+            add('_cut_merge_h', (*arrays('Hx', 'Bx', 'MRxx_Hx'), *cutcell[2:6]),
+                (len(cutcell[2]) - 1,))
+            add('_cut_merge_h', (*arrays('Hy', 'By', 'MRyy_Hy'), *cutcell[6:10]),
+                (len(cutcell[6]) - 1,))
+            add('_cut_tm_zero_h', (*arrays('Hx', 'Hy', 'Bx', 'By'), *cutcell[:2]))
         add('_tm_curl_h', (*arrays('Hx', 'Hy', 'd_Hx_y', 'd_Hy_x'), sim.dx, sim.dy,
                            periodic_x, periodic_y))
         inject(h, sim.d_Hx_y, sim.d_Hy_x)
@@ -217,11 +239,18 @@ def prepare(sim, polarization, record_stride, include_history):
     else:
         hz_previous = sim.Hz.copy()
         add('_te_curl_e', (*arrays('Ex', 'Ey', 'd_Ex_y', 'd_Ey_x'), sim.dx, sim.dy))
+        if cutcell:
+            add('_cut_te_curl_e', (*arrays('Ex', 'Ey', 'd_Ex_y', 'd_Ey_x'),
+                                   *cutcell[:3], sim.dx, sim.dy))
         inject(e, sim.d_Ex_y, sim.d_Ey_x)
         table(be, sim.d_Ex_y, sim.d_Ey_x)
         add('_te_update_h', (*arrays('Hz', 'Bz'), hz_previous,
             *arrays('d_Ex_y', 'd_Ey_x', 'Psi_Bz_x', 'Psi_Bz_y', 'b_Bz_x', 'c_Bz_x',
                     'b_Bz_y', 'c_Bz_y', 'kappa_x', 'kappa_y', 'CaHz', 'CbHz', 'MRzz_Hz')))
+        if cutcell:
+            add('_cut_merge_h', (*arrays('Hz', 'Bz', 'MRzz_Hz'), *cutcell[3:7]),
+                (len(cutcell[3]) - 1,))
+            add('_cut_te_zero_h', (*arrays('Hz', 'Bz'), cutcell[0]))
         inject(soft, sim.Bz, sim.Bz)
         add('_te_finalize_h', arrays('Hz', 'Bz', 'MRzz_Hz', 'PMC_Hz'))
         add('_te_curl_h', (*arrays('Hz', 'd_Hz_y', 'd_Hz_x'), sim.dx, sim.dy,
@@ -252,6 +281,7 @@ def prepare(sim, polarization, record_stride, include_history):
         (*arrays(*history_names), *histories.values(), clock, stride))
     add('_advance_clock', (clock,), (1,))
     return dict(polarization=polarization, stages=stages, mutable=mutable, ade=ade_states, histories=histories,
+                cutcell=cutcell,
                 clock=clock, stride=stride, count=record_count, include=bool(include_history),
                 monitors=monitor_values, descriptions=descriptions, monitor_names=monitor_names,
                 source_events=sum(events.count for events in event_sets),
@@ -334,6 +364,8 @@ def _run_gpu(sim, prepared, extension, progress=False):
             buffers.upload(arg)
         launches = []
         for stage in stages:
+            if prepared['cutcell'] and stage.name in {'_tm_curl_e', '_te_curl_e'}:
+                continue
             if (prepared['polarization'] == 'te' and stage.name == '_finalize_e'
                     and not stage.args[-1]):
                 continue  # Nondispersive TE finalization is fused into its E update.
@@ -426,9 +458,14 @@ def run(sim, polarization, record_stride=1, is_include_history=True, *, progress
     prepared = prepare(sim, polarization, record_stride, is_include_history)
     setup_seconds = perf_counter() - start
     if sim.backend == 'cython':
-        args = tuple(stage.args for stage in prepared['stages'])
+        args = tuple(stage.args for stage in prepared['stages']
+                     if not stage.name.startswith('_cut_'))
         start = perf_counter()
-        getattr(extension, 'run_' + polarization)(args, sim.Nt, sim.Nx, sim.Ny, progress)
+        runner = getattr(extension, 'run_' + polarization)
+        if prepared['cutcell']:
+            runner(args, sim.Nt, sim.Nx, sim.Ny, progress, prepared['cutcell'])
+        else:
+            runner(args, sim.Nt, sim.Nx, sim.Ny, progress)
         timings = dict(stepping_seconds=perf_counter() - start, download_seconds=0.0)
     else:
         timings = _run_gpu(sim, prepared, extension, progress)

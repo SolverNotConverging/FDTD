@@ -1,4 +1,5 @@
 from FDTD_common.runtime_2d import select_backend, reference_substep, run as run_compiled
+from FDTD_common.pec_cutcell import rasterize_pec, enlarged_groups
 import numpy as np
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
@@ -59,7 +60,7 @@ class FDTD_2D_Hz:
         dx = lambda_min / cells_per_wavelength
         dy = dx
 
-        dt_cfl = np.sqrt(dx ** 2 + dy ** 2) / (2 * c0)
+        dt_cfl = dx * dy / (c0 * np.sqrt(dx ** 2 + dy ** 2))
         dt_freq_sampling = 1.0 / (time_samples_per_period * f_max)
         dt = min(courant_factor * dt_cfl, dt_freq_sampling)
 
@@ -103,7 +104,8 @@ class FDTD_2D_Hz:
         self.Nt = int(Nt)
         self.f_min = f_min if f_min is not None else None
         self.f_max = float(f_max)
-        dt_cfl = np.sqrt(self.dx ** 2 + self.dy ** 2) / (2 * self.c0)
+        dt_cfl = self.dx * self.dy / (
+            self.c0 * np.sqrt(self.dx ** 2 + self.dy ** 2))
         dt_freq_sampling = 1.0 / (20 * self.f_max)
         self.dt = float(dt) if dt is not None else min(dt_cfl, dt_freq_sampling)
 
@@ -156,6 +158,13 @@ class FDTD_2D_Hz:
 
         # Perfect-conductor masks are geometric constraints, not extreme ER/MR.
         self.PEC_cells = np.zeros((self.Nx, self.Ny), dtype=bool)
+        self._pec_shapes = []
+        self._pec_samples = self.subpixel * 3
+        self.pec_fluid_area = np.ones((self.Nx, self.Ny))
+        self.pec_open_Ex = np.ones_like(self.Ex)
+        self.pec_open_Ey = np.ones_like(self.Ey)
+        self._pec_enlarged_groups = []
+        self._has_cutcell = False
         self.PMC_cells = np.zeros((self.Nx, self.Ny), dtype=bool)
         self.PEC_Ex = np.zeros_like(self.Ex, dtype=bool)
         self.PEC_Ey = np.zeros_like(self.Ey, dtype=bool)
@@ -410,12 +419,25 @@ class FDTD_2D_Hz:
         return values[0]
 
     def _refresh_conductor_masks(self):
-        self.PEC_Ex.fill(False)
-        self.PEC_Ex[:, :-1] |= self.PEC_cells
-        self.PEC_Ex[:, 1:] |= self.PEC_cells
-        self.PEC_Ey.fill(False)
-        self.PEC_Ey[:-1, :] |= self.PEC_cells
-        self.PEC_Ey[1:, :] |= self.PEC_cells
+        if self._pec_shapes:
+            (self.pec_fluid_area, self.pec_open_Ex, self.pec_open_Ey,
+             _) = rasterize_pec(self._pec_shapes, self.Nx, self.Ny,
+                                self.dx, self.dy, self._pec_samples)
+            self.PEC_Ex[:] = self.pec_open_Ex == 0
+            self.PEC_Ey[:] = self.pec_open_Ey == 0
+            self._pec_enlarged_groups = enlarged_groups(
+                self.pec_fluid_area, self.pec_open_Ex, self.pec_open_Ey)
+            self._has_cutcell = bool(
+                np.any((self.pec_fluid_area > 0) & (self.pec_fluid_area < 1))
+                or np.any((self.pec_open_Ex > 0) & (self.pec_open_Ex < 1))
+                or np.any((self.pec_open_Ey > 0) & (self.pec_open_Ey < 1)))
+        else:
+            self.PEC_Ex.fill(False)
+            self.PEC_Ex[:, :-1] |= self.PEC_cells
+            self.PEC_Ex[:, 1:] |= self.PEC_cells
+            self.PEC_Ey.fill(False)
+            self.PEC_Ey[:-1, :] |= self.PEC_cells
+            self.PEC_Ey[1:, :] |= self.PEC_cells
         self.PMC_Hz[:] = self.PMC_cells
 
         self.Ex_update_coeff = (~self.PEC_Ex).astype(float)
@@ -432,6 +454,9 @@ class FDTD_2D_Hz:
         self.PEC_Ex = np.zeros_like(self.Ex, dtype=bool)
         self.PEC_Ey = np.zeros_like(self.Ey, dtype=bool)
         self.PMC_Hz = np.zeros_like(self.Hz, dtype=bool)
+        self._pec_shapes = getattr(self, "_pec_shapes", [])
+        self._pec_samples = getattr(self, "_pec_samples", self.subpixel * 3)
+        self._has_cutcell = False
         self._refresh_conductor_masks()
 
     def _draw_conductor_regions(self, ax, add_legend=False):
@@ -460,14 +485,34 @@ class FDTD_2D_Hz:
                       loc="upper right")
         return contours
 
-    def _mark_special_cells(self, cells, material):
-        if material == "PEC":
-            self.PEC_cells[cells] = True
-            self.PMC_cells[cells] = False
-        else:
-            self.PMC_cells[cells] = True
-            self.PEC_cells[cells] = False
-        self._refresh_conductor_masks()
+    def _mark_special_cells(self, cells, material, geometry=None, subpixel=None):
+        old_pec = self.PEC_cells.copy()
+        old_pmc = self.PMC_cells.copy()
+        old_shapes = list(self._pec_shapes)
+        old_samples = self._pec_samples
+        try:
+            if material == "PEC":
+                self.PEC_cells[cells] = True
+                self.PMC_cells[cells] = False
+                if geometry is not None:
+                    self._pec_shapes.append(("PEC", *geometry))
+                    if subpixel is not None:
+                        if not isinstance(subpixel, (int, np.integer)) or subpixel < 1:
+                            raise ValueError("subpixel must be a positive integer.")
+                        self._pec_samples = max(self._pec_samples, int(subpixel) * 3)
+            else:
+                self.PMC_cells[cells] = True
+                self.PEC_cells[cells] = False
+                if geometry is not None:
+                    self._pec_shapes.append(("PMC", *geometry))
+            self._refresh_conductor_masks()
+        except Exception:
+            self.PEC_cells = old_pec
+            self.PMC_cells = old_pmc
+            self._pec_shapes = old_shapes
+            self._pec_samples = old_samples
+            self._refresh_conductor_masks()
+            raise
         self._ade_dirty = True
         self._ade_update_pending = False
         self._ade_last_Dx = None
@@ -514,7 +559,8 @@ class FDTD_2D_Hz:
             cells[i_min:i_max + 1, j_min:j_max + 1] = (
                     (xc[:, None] >= x0m) & (xc[:, None] < x1m)
                     & (yc[None, :] >= y0m) & (yc[None, :] < y1m))
-            self._mark_special_cells(cells, special)
+            self._mark_special_cells(cells, special,
+                                     ("rectangle", (x0m, x1m, y0m, y1m)), subpixel)
             return
 
         nsub = self.subpixel if subpixel is None else subpixel
@@ -600,7 +646,9 @@ class FDTD_2D_Hz:
             yc = (np.arange(j_min, j_max + 1) + 0.5) * dy
             cells[i_min:i_max + 1, j_min:j_max + 1] = (
                     (xc[:, None] - cx) ** 2 + (yc[None, :] - cy) ** 2 <= radius ** 2)
-            self._mark_special_cells(cells, special)
+            self._mark_special_cells(cells, special,
+                                     ("circle", (cx, cy, radius)),
+                                     subpixel if subpixel is not None else nsub)
             return
 
         # --- supersampling grid offsets inside a cell ---
@@ -692,7 +740,8 @@ class FDTD_2D_Hz:
             xs = (np.arange(i_min, i_max + 1) + 0.5) * self.dx
             ys = (np.arange(j_min, j_max + 1) + 0.5) * self.dy
             cells[i_min:i_max + 1, j_min:j_max + 1] = inside(xs[:, None], ys[None, :])
-            self._mark_special_cells(cells, special)
+            self._mark_special_cells(cells, special,
+                                     ("triangle", tuple(map(tuple, points))), subpixel)
             return
 
         nsub = self.subpixel if subpixel is None else subpixel
@@ -1617,6 +1666,16 @@ class FDTD_2D_Hz:
             for j in range(self.Ny):
                 self.d_Ex_y[i, j] = (self.Ex[i, j + 1] - self.Ex[i, j]) / self.dy
                 self.d_Ey_x[i, j] = (self.Ey[i + 1, j] - self.Ey[i, j]) / self.dx
+        if self._has_cutcell:
+            area = self.pec_fluid_area
+            self.d_Ex_y[:] = np.divide(
+                self.Ex[:, 1:] * self.pec_open_Ex[:, 1:]
+                - self.Ex[:, :-1] * self.pec_open_Ex[:, :-1],
+                self.dy * area, out=np.zeros_like(self.d_Ex_y), where=area > 0)
+            self.d_Ey_x[:] = np.divide(
+                self.Ey[1:, :] * self.pec_open_Ey[1:, :]
+                - self.Ey[:-1, :] * self.pec_open_Ey[:-1, :],
+                self.dx * area, out=np.zeros_like(self.d_Ey_x), where=area > 0)
 
     def calcualte_Psi_B(self):
         reference_substep(self)
@@ -1628,6 +1687,12 @@ class FDTD_2D_Hz:
         self.Hz = self.CaHz * self.Hz - self.CbHz * (
                 self.d_Ey_x / self.kappa_x - self.d_Ex_y / self.kappa_y
                 + self.Psi_Bz_x - self.Psi_Bz_y)
+        for members in self._pec_enlarged_groups if self._has_cutcell else ():
+            ii, jj = np.asarray(members).T
+            weights = self.pec_fluid_area[ii, jj] * self.MRzz_Hz[ii, jj]
+            self.Hz[ii, jj] = np.dot(weights, self.Hz[ii, jj]) / weights.sum()
+        if self._has_cutcell:
+            self.Hz[self.pec_fluid_area == 0] = 0.0
         self.Bz = self.MRzz_Hz * self.Hz
 
     def update_H(self):

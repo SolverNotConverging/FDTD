@@ -378,3 +378,64 @@ def _te_record_history(ex, ey, hz, ex_history, ey_history, hz_history,
 def _advance_clock(clock):
     if cuda.grid(1) == 0:
         clock[0] += 1
+
+
+@cuda.jit
+def _cut_tm_curl_e(ez, d_ez_y, d_ez_x, open_hx, open_hy, dx, dy):
+    j, i = cuda.grid(2)
+    if i < d_ez_y.shape[0] and j < d_ez_y.shape[1]:
+        fraction = open_hx[i, j]
+        d_ez_y[i, j] = ((ez[i, j + 1] - ez[i, j]) / (dy * fraction)
+                        if fraction > 0 else 0.0)
+    if i < d_ez_x.shape[0] and j < d_ez_x.shape[1]:
+        fraction = open_hy[i, j]
+        d_ez_x[i, j] = ((ez[i + 1, j] - ez[i, j]) / (dx * fraction)
+                        if fraction > 0 else 0.0)
+
+
+@cuda.jit
+def _cut_te_curl_e(ex, ey, d_ex_y, d_ey_x, area, open_ex, open_ey, dx, dy):
+    j, i = cuda.grid(2)
+    if i < area.shape[0] and j < area.shape[1]:
+        fraction = area[i, j]
+        if fraction > 0:
+            d_ex_y[i, j] = (ex[i, j + 1] * open_ex[i, j + 1]
+                            - ex[i, j] * open_ex[i, j]) / (dy * fraction)
+            d_ey_x[i, j] = (ey[i + 1, j] * open_ey[i + 1, j]
+                            - ey[i, j] * open_ey[i, j]) / (dx * fraction)
+        else:
+            d_ex_y[i, j] = 0.0
+            d_ey_x[i, j] = 0.0
+
+
+@cuda.jit
+def _cut_merge_h(field, flux, material, offsets, ii, jj, weights):
+    group = cuda.grid(1)
+    if group >= offsets.shape[0] - 1:
+        return
+    value = 0.0
+    for member in range(offsets[group], offsets[group + 1]):
+        value += weights[member] * field[ii[member], jj[member]]
+    for member in range(offsets[group], offsets[group + 1]):
+        i, j = ii[member], jj[member]
+        field[i, j] = value
+        flux[i, j] = material[i, j] * value
+
+
+@cuda.jit
+def _cut_tm_zero_h(hx, hy, bx, by, open_hx, open_hy):
+    j, i = cuda.grid(2)
+    if i < hx.shape[0] and j < hx.shape[1] and open_hx[i, j] == 0:
+        hx[i, j] = 0.0
+        bx[i, j] = 0.0
+    if i < hy.shape[0] and j < hy.shape[1] and open_hy[i, j] == 0:
+        hy[i, j] = 0.0
+        by[i, j] = 0.0
+
+
+@cuda.jit
+def _cut_te_zero_h(hz, bz, area):
+    j, i = cuda.grid(2)
+    if i < hz.shape[0] and j < hz.shape[1] and area[i, j] == 0:
+        hz[i, j] = 0.0
+        bz[i, j] = 0.0

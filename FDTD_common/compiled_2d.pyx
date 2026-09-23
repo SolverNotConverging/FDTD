@@ -449,7 +449,64 @@ cdef void _te_record_history(
 cdef void _advance_clock(int64_t[::1] clock) noexcept nogil:
     clock[0] += 1
 
-cpdef run_tm(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint progress=False):
+cdef void _cut_tm_curl_e(
+    double[:, ::1] ez, double[:, ::1] d_ez_y, double[:, ::1] d_ez_x,
+    double[:, ::1] open_hx, double[:, ::1] open_hy, double dx, double dy,
+    Py_ssize_t nx, Py_ssize_t ny) noexcept nogil:
+    cdef Py_ssize_t i, j
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            if j < ny:
+                d_ez_y[i, j] = ((ez[i, j + 1] - ez[i, j]) / (dy * open_hx[i, j])
+                                 if open_hx[i, j] > 0 else 0.0)
+            if i < nx:
+                d_ez_x[i, j] = ((ez[i + 1, j] - ez[i, j]) / (dx * open_hy[i, j])
+                                 if open_hy[i, j] > 0 else 0.0)
+
+cdef void _cut_te_curl_e(
+    double[:, ::1] ex, double[:, ::1] ey, double[:, ::1] d_ex_y,
+    double[:, ::1] d_ey_x, double[:, ::1] area, double[:, ::1] open_ex,
+    double[:, ::1] open_ey, double dx, double dy,
+    Py_ssize_t nx, Py_ssize_t ny) noexcept nogil:
+    cdef Py_ssize_t i, j
+    for i in range(nx):
+        for j in range(ny):
+            if area[i, j] > 0:
+                d_ex_y[i, j] = (ex[i, j + 1] * open_ex[i, j + 1]
+                                - ex[i, j] * open_ex[i, j]) / (dy * area[i, j])
+                d_ey_x[i, j] = (ey[i + 1, j] * open_ey[i + 1, j]
+                                - ey[i, j] * open_ey[i, j]) / (dx * area[i, j])
+            else:
+                d_ex_y[i, j] = 0.0
+                d_ey_x[i, j] = 0.0
+
+cdef void _cut_merge_h(
+    double[:, ::1] field, double[:, ::1] flux, double[:, ::1] material,
+    int64_t[::1] offsets, int64_t[::1] ii, int64_t[::1] jj,
+    double[::1] weights) noexcept nogil:
+    cdef Py_ssize_t group, member, i, j
+    cdef double value
+    for group in range(offsets.shape[0] - 1):
+        value = 0.0
+        for member in range(offsets[group], offsets[group + 1]):
+            value += weights[member] * field[ii[member], jj[member]]
+        for member in range(offsets[group], offsets[group + 1]):
+            i = ii[member]
+            j = jj[member]
+            field[i, j] = value
+            flux[i, j] = material[i, j] * value
+
+cdef void _cut_zero_h(
+    double[:, ::1] field, double[:, ::1] flux, double[:, ::1] fraction) noexcept nogil:
+    cdef Py_ssize_t i, j
+    for i in range(field.shape[0]):
+        for j in range(field.shape[1]):
+            if fraction[i, j] == 0:
+                field[i, j] = 0.0
+                flux[i, j] = 0.0
+
+cpdef run_tm(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny,
+             bint progress=False, tuple cutcell=()):
     if len(stages) != 13 or steps < 0 or nx < 1 or ny < 1:
         raise ValueError("Invalid prepared 2D execution plan.")
     cdef Py_ssize_t step
@@ -609,12 +666,27 @@ cpdef run_tm(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint 
     cdef int64_t[::1] s11_clock = stages[11][8]
     cdef Py_ssize_t s11_stride = stages[11][9]
     cdef int64_t[::1] s12_clock = stages[12][0]
+    cdef bint has_cut = len(cutcell) != 0
+    cdef double[:, ::1] cut_open_hx = cutcell[0] if has_cut else s3_mr_hx
+    cdef double[:, ::1] cut_open_hy = cutcell[1] if has_cut else s3_mr_hy
+    cdef int64_t[::1] cut_hx_offsets = cutcell[2] if has_cut else s1_ii
+    cdef int64_t[::1] cut_hx_ii = cutcell[3] if has_cut else s1_ii
+    cdef int64_t[::1] cut_hx_jj = cutcell[4] if has_cut else s1_jj
+    cdef double[::1] cut_hx_weights = cutcell[5] if has_cut else s1_factors
+    cdef int64_t[::1] cut_hy_offsets = cutcell[6] if has_cut else s1_ii
+    cdef int64_t[::1] cut_hy_ii = cutcell[7] if has_cut else s1_ii
+    cdef int64_t[::1] cut_hy_jj = cutcell[8] if has_cut else s1_jj
+    cdef double[::1] cut_hy_weights = cutcell[9] if has_cut else s1_factors
     cdef NativeProgress reporter
     with nogil:
         if progress:
             progress_start(&reporter, steps)
         for step in range(steps):
-            _tm_curl_e(s0_ez, s0_d_ez_y, s0_d_ez_x, s0_dx, s0_dy, nx, ny)
+            if has_cut:
+                _cut_tm_curl_e(s0_ez, s0_d_ez_y, s0_d_ez_x,
+                               cut_open_hx, cut_open_hy, s0_dx, s0_dy, nx, ny)
+            else:
+                _tm_curl_e(s0_ez, s0_d_ez_y, s0_d_ez_x, s0_dx, s0_dy, nx, ny)
             _inject_events(
                 s1_first, s1_second, s1_targets, s1_ii, s1_jj, s1_source_ids, s1_factors, s1_shifts,
                 s1_count, s1_clock, s1_dt, s1_modes, s1_amplitudes, s1_t0, s1_tw, s1_frequencies)
@@ -624,6 +696,13 @@ cpdef run_tm(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint 
                 s3_psi_bx_y, s3_psi_by_x, s3_b_bx_y, s3_c_bx_y, s3_b_by_x, s3_c_by_x, s3_kappa_y_hx,
                 s3_kappa_x_hy, s3_ca_hx, s3_cb_hx, s3_ca_hy, s3_cb_hy, s3_mr_hx, s3_mr_hy, s3_pmc_hx,
                 s3_pmc_hy, nx, ny)
+            if has_cut:
+                _cut_merge_h(s3_hx, s3_bx, s3_mr_hx, cut_hx_offsets,
+                             cut_hx_ii, cut_hx_jj, cut_hx_weights)
+                _cut_merge_h(s3_hy, s3_by, s3_mr_hy, cut_hy_offsets,
+                             cut_hy_ii, cut_hy_jj, cut_hy_weights)
+                _cut_zero_h(s3_hx, s3_bx, cut_open_hx)
+                _cut_zero_h(s3_hy, s3_by, cut_open_hy)
             _tm_curl_h(s4_hx, s4_hy, s4_d_hx_y, s4_d_hy_x, s4_dx, s4_dy, s4_periodic_x, s4_periodic_y, nx, ny)
             _inject_events(
                 s5_first, s5_second, s5_targets, s5_ii, s5_jj, s5_source_ids, s5_factors, s5_shifts,
@@ -652,7 +731,8 @@ cpdef run_tm(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint 
         if progress:
             progress_update(&reporter, steps, steps, True)
 
-cpdef run_te(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint progress=False):
+cpdef run_te(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny,
+             bint progress=False, tuple cutcell=()):
     if len(stages) != 15 or steps < 0 or nx < 1 or ny < 1:
         raise ValueError("Invalid prepared 2D execution plan.")
     cdef Py_ssize_t step
@@ -825,12 +905,24 @@ cpdef run_te(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint 
     cdef int64_t[::1] s13_clock = stages[13][6]
     cdef Py_ssize_t s13_stride = stages[13][7]
     cdef int64_t[::1] s14_clock = stages[14][0]
+    cdef bint has_cut = len(cutcell) != 0
+    cdef double[:, ::1] cut_area = cutcell[0] if has_cut else s3_mr_hz
+    cdef double[:, ::1] cut_open_ex = cutcell[1] if has_cut else s3_mr_hz
+    cdef double[:, ::1] cut_open_ey = cutcell[2] if has_cut else s3_mr_hz
+    cdef int64_t[::1] cut_offsets = cutcell[3] if has_cut else s1_ii
+    cdef int64_t[::1] cut_ii = cutcell[4] if has_cut else s1_ii
+    cdef int64_t[::1] cut_jj = cutcell[5] if has_cut else s1_jj
+    cdef double[::1] cut_weights = cutcell[6] if has_cut else s1_factors
     cdef NativeProgress reporter
     with nogil:
         if progress:
             progress_start(&reporter, steps)
         for step in range(steps):
-            _te_curl_e(s0_ex, s0_ey, s0_d_ex_y, s0_d_ey_x, s0_dx, s0_dy, nx, ny)
+            if has_cut:
+                _cut_te_curl_e(s0_ex, s0_ey, s0_d_ex_y, s0_d_ey_x,
+                               cut_area, cut_open_ex, cut_open_ey, s0_dx, s0_dy, nx, ny)
+            else:
+                _te_curl_e(s0_ex, s0_ey, s0_d_ex_y, s0_d_ey_x, s0_dx, s0_dy, nx, ny)
             _inject_events(
                 s1_first, s1_second, s1_targets, s1_ii, s1_jj, s1_source_ids, s1_factors, s1_shifts,
                 s1_count, s1_clock, s1_dt, s1_modes, s1_amplitudes, s1_t0, s1_tw, s1_frequencies)
@@ -839,6 +931,10 @@ cpdef run_te(tuple stages, Py_ssize_t steps, Py_ssize_t nx, Py_ssize_t ny, bint 
                 s3_hz, s3_bz, s3_hz_previous, s3_d_ex_y, s3_d_ey_x, s3_psi_bz_x, s3_psi_bz_y, s3_b_bz_x,
                 s3_c_bz_x, s3_b_bz_y, s3_c_bz_y, s3_kappa_x, s3_kappa_y, s3_ca_hz, s3_cb_hz, s3_mr_hz, nx,
                 ny)
+            if has_cut:
+                _cut_merge_h(s3_hz, s3_bz, s3_mr_hz, cut_offsets,
+                             cut_ii, cut_jj, cut_weights)
+                _cut_zero_h(s3_hz, s3_bz, cut_area)
             _inject_events(
                 s4_first, s4_second, s4_targets, s4_ii, s4_jj, s4_source_ids, s4_factors, s4_shifts,
                 s4_count, s4_clock, s4_dt, s4_modes, s4_amplitudes, s4_t0, s4_tw, s4_frequencies)

@@ -92,6 +92,24 @@ second; `tau` is in seconds. Pole parameters can also be Cartesian triples.
 
 `vacuum`, `PEC`, and `PMC` are predefined.
 
+### PEC cut cells in the Cartesian 2D solvers
+
+`FDTD_2D_Ez` and `FDTD_2D_Hz` retain subcell geometry for PEC rectangles,
+circles, and triangles. The PEC-free cell areas and edge lengths are sampled at
+three times the solver's `subpixel` resolution (or a larger per-shape override).
+TEz uses the open-edge lengths
+in Faraday's circulation; TMz uses the open portions of the segments between
+`Ez` nodes. Small cut cells or segments share their update with connected fluid
+neighbors, so the ordinary Cartesian time step can be used without shrinking
+it to the smallest PEC sliver. An isolated sliver with no fluid neighbor raises
+an error when the shape is added.
+
+Material interfaces still use the existing subpixel averaging. PMC remains
+cell-based. Both `config("cpu")` and `config("gpu")` run the cut-cell updates in
+their native time loops, including enlarged-cell transfers. As with other
+accelerated 2D runs, build the Cython extension before selecting either
+backend. Grid-aligned PEC regions retain their original Cartesian fast path.
+
 ### Schwarzschild GR example
 
 ```python
