@@ -65,7 +65,9 @@ void ObjectDialog::rebuild() {
         choice("axis","Normal axis",{"x","y"},"x"); number("position","Plane position (mm)",0);
         auto span=initial_["span"].toArray(); if(span.size()==2) { initial_["span_min"]=span[0]; initial_["span_max"]=span[1]; }
         number("span_min","Aperture start (mm)",0); number("span_max","Aperture end (mm)",12);
-        initial_["normal_sign"]=initial_["normal"].toInt(1)==1?"+1":"-1"; choice("normal_sign","Outward normal",{"+1","-1"},"+1");
+        const int inward=initial_.contains("inward_normal")?initial_["inward_normal"].toInt():-initial_["normal"].toInt(index_>=0?1:-1);
+        initial_["normal_sign"]=inward==1?"+1":"-1"; choice("normal_sign","Inward normal",{"+1","-1"},"+1");
+        choices_["normal_sign"]->setObjectName("inwardNormal"); choices_["normal_sign"]->setToolTip("Direction into the device, along the selected X/Y axis.");
         number("modes","Tracked modes",1,1,16,0); number("mesh_step_mm","Port mesh step (mm; 0 = auto)",0,0,1e6);
         number("length_cells","Virtual guide length (cells)",32,5,1000,0); number("pml_cells","Virtual guide PML (cells)",12,2,500,0); number("clearance_cells","Source clearance (cells)",6,1,500,0);
     }
@@ -127,7 +129,7 @@ void ObjectDialog::finish() {
     }
     if(kind=="waveguide") {
         if(n("span_max")<=n("span_min")||n("length_cells")<n("pml_cells")+n("clearance_cells")+3) { error("Check aperture ordering and guide length (PML + clearance + 3 minimum)."); return; }
-        value["axis"]=c("axis"); value["position"]=n("position"); value["span"]=QJsonArray{n("span_min"),n("span_max")}; value["normal"]=c("normal_sign")=="+1"?1:-1;
+        value["axis"]=c("axis"); value["position"]=n("position"); value["span"]=QJsonArray{n("span_min"),n("span_max")}; value["inward_normal"]=c("normal_sign")=="+1"?1:-1; value.remove("normal");
         for(const auto& key:{QString("modes"),QString("length_cells"),QString("pml_cells"),QString("clearance_cells")}) value[key]=int(n(key));
         if(n("mesh_step_mm")>0) value["mesh_step_mm"]=n("mesh_step_mm");
     }
@@ -152,11 +154,14 @@ SettingsDialog::SettingsDialog(const QJsonObject& project,QWidget* parent):QDial
     auto settings=project["settings"].toObject(); auto* physics=new QWidget; auto* mesh=new QWidget; auto* run=new QWidget;
     auto* pf=new QFormLayout(physics); auto* mf=new QFormLayout(mesh); auto* rf=new QFormLayout(run);
     tabs->addTab(physics,"Physics"); tabs->addTab(mesh,"Mesh & domain"); tabs->addTab(run,"Run & stopping");
-    polarization_=new QComboBox; polarization_->addItems({"TM","TE"}); polarization_->setCurrentText(settings["polarization"].toString("TM")); pf->addRow("Polarization",polarization_);
+    polarization_=new QComboBox; polarization_->setObjectName("polarization"); polarization_->addItem("Hz (TEM-capable)","TE"); polarization_->addItem("Ez","TM"); polarization_->setCurrentIndex(settings["polarization"].toString("TM")=="TE"?0:1); pf->addRow("Field mode",polarization_);
     study_=new QComboBox; study_->addItem("Full S matrix (independent port drives)","sparameters"); study_->addItem("Selected coherent excitations","excitation"); study_->setCurrentIndex(settings["study"].toString()=="excitation"?1:0); pf->addRow("Study",study_);
     auto add=[&](QFormLayout* f,const QString& key,const QString& title,double low,double high,int decimals=6) { auto* box=new QDoubleSpinBox; box->setRange(low,high); box->setDecimals(decimals); box->setValue(settings[key].toDouble()); box->setKeyboardTracking(false); f->addRow(title,box); numbers_[key]=box; };
     add(pf,"f_min_ghz","Start frequency (GHz)",.000001,1e9); add(pf,"f_max_ghz","Stop frequency (GHz)",.000001,1e9); add(pf,"frequency_count","DFT samples",1,2001,0);
     add(pf,"pulse_ghz","Pulse carrier (GHz)",0,1e9); add(pf,"pulse_width_ps","Gaussian width (ps)",.000001,1e9); add(pf,"pulse_delay_ps","Pulse delay (ps; 0 = auto)",0,1e9);
+    auto* pulseMode=new QComboBox; pulseMode->setObjectName("pulseMode"); pulseMode->addItem("Auto from frequency band","auto"); pulseMode->addItem("Manual Gaussian pulse","manual"); pulseMode->setCurrentIndex(settings["pulse_mode"].toString("manual")=="auto"?0:1); pf->insertRow(4,"Waveform / pulse",pulseMode);
+    connect(pulseMode,qOverload<int>(&QComboBox::currentIndexChanged),this,[this,pulseMode]{result_["pulse_mode"]=pulseMode->currentData().toString(); for(const auto& key:{QString("pulse_ghz"),QString("pulse_width_ps"),QString("pulse_delay_ps")}) numbers_[key]->setEnabled(pulseMode->currentData().toString()=="manual");});
+    result_["pulse_mode"]=pulseMode->currentData().toString(); for(const auto& key:{QString("pulse_ghz"),QString("pulse_width_ps"),QString("pulse_delay_ps")}) numbers_[key]->setEnabled(pulseMode->currentData().toString()=="manual");
     const auto bg=project["background"].toObject(); settings["background_epsilon"]=bg["epsilon_r"].toDouble(1); settings["background_mu"]=bg["mu_r"].toDouble(1);
     add(pf,"background_epsilon","Background permittivity",1,1e6); add(pf,"background_mu","Background permeability",1,1e6);
     add(mf,"max_step_mm","Maximum cell size (mm)",.000001,1e6); add(mf,"min_step_mm","Minimum cell size (mm)",.000001,1e6);
@@ -164,6 +169,7 @@ SettingsDialog::SettingsDialog(const QJsonObject& project,QWidget* parent):QDial
     add(mf,"enlargement","Minimum retained area fraction",0,1); add(mf,"pml_cells","Domain PML cells",2,100,0); add(mf,"clearance_wavelengths","Background clearance (wavelengths)",0,10);
     mf->addRow(new QLabel("The domain, closed NTFF and optional TF/SF boxes follow the objects."));
     add(rf,"max_time_ns","Maximum duration (ns)",.000001,1e9); add(rf,"min_time_ns","Minimum duration (ns)",0,1e9);
+    add(rf,"time_snapshot_interval_ns","Save time fields every (ns; 0 = recent history)",0,1e9);
     add(rf,"field_tolerance","Field energy tolerance (0 = off)",0,.999999,9); add(rf,"dft_tolerance","DFT tolerance (0 = off)",0,.999999,9);
     rf->addRow(new QLabel("All ports receive; checked excitations transmit in a coherent run.\nS-matrix studies drive each channel independently.\nBoth stopping tests must pass when enabled."));
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel); layout->addWidget(buttons); connect(buttons,&QDialogButtonBox::accepted,this,&SettingsDialog::finish); connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);
@@ -175,7 +181,8 @@ void SettingsDialog::finish() {
     }
     auto settings=result_["settings"].toObject();
     for(auto i=numbers_.cbegin();i!=numbers_.cend();++i) if(!i.key().startsWith("background_")) settings[i.key()]=i.value()->value();
-    settings["polarization"]=polarization_->currentText(); settings["study"]=study_->currentData().toString(); result_["settings"]=settings;
+    if(result_["pulse_mode"].toString()=="auto"&&n("f_max_ghz")<=n("f_min_ghz")) {QMessageBox::warning(this,"Invalid settings","Automatic pulse requires a nonzero frequency band.");return;}
+    settings["pulse_mode"]=result_.take("pulse_mode"); settings["polarization"]=polarization_->currentData().toString(); settings["study"]=study_->currentData().toString(); result_["settings"]=settings;
     auto bg=result_["background"].toObject(); bg["epsilon_r"]=n("background_epsilon"); bg["mu_r"]=n("background_mu"); result_["background"]=bg;
     accept();
 }

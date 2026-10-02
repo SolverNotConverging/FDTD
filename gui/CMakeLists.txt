@@ -8,7 +8,8 @@ find_package(VTK 9.2 REQUIRED COMPONENTS CommonCore CommonDataModel CommonExecut
     FiltersGeneral GUISupportQt InteractionStyle IOImage IOXML RenderingCore RenderingOpenGL2 RenderingAnnotation)
 add_library(studio_core STATIC src/Project.cpp src/Project.h src/Canvas.cpp src/Canvas.h
     src/Plot.cpp src/Plot.h src/Dialogs.cpp src/Dialogs.h src/FieldView.cpp src/FieldView.h
-    src/MainWindow.cpp src/MainWindow.h src/Inspection.cpp src/Inspection.h)
+    src/MainWindow.cpp src/MainWindow.h src/Inspection.cpp src/Inspection.h src/Ribbon.cpp src/Ribbon.h
+    src/Radiation.cpp src/Radiation.h src/SnapshotPlayer.cpp src/SnapshotPlayer.h)
 target_include_directories(studio_core PUBLIC src)
 target_link_libraries(studio_core PUBLIC Qt6::Widgets Qt6::OpenGLWidgets ${VTK_LIBRARIES})
 target_compile_definitions(studio_core PUBLIC FDTD_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")

@@ -23,11 +23,23 @@ void Plot::setCurves(QVector<Curve> curves,const QString& x,const QString& y,boo
     else {
         if(xmax_<=xmin_) { xmin_-=.5; xmax_+=.5; }
         if(ymax_<=ymin_) { ymin_-=1.; ymax_+=1.; }
+        else if(!polar_&&(ymax_-ymin_)<=1e-8*std::max(std::abs(ymin_),std::abs(ymax_))) {
+            // Do not magnify eigensolver roundoff in a uniform TEM field.
+            const double margin=.05*std::max(std::abs(ymin_),std::abs(ymax_)); ymin_-=margin; ymax_+=margin;
+        }
         const double pad=(ymax_-ymin_)*.08;
-        if(polar_) { if(yLabel_.contains("dB")) { ymin_=-60.; ymax_=0.; } else { ymin_=0.; ymax_=std::max(ymax_,1e-300); } }
-        else { ymin_-=pad; ymax_+=pad; }
+        if(polar_) { if(yLabel_.contains("dB")) { ymax_=yLabel_=="Relative power (dB)"?0.:std::ceil(ymax_); ymin_=ymax_-60.; } else { ymin_=0.; ymax_=std::max(ymax_,1e-300); } }
+        else { ymin_-=pad; ymax_+=pad; if(zeroReference_) {ymin_=std::min(ymin_,0.); ymax_=std::max(ymax_,0.);} }
     }
     update();
+}
+QVector<double> Plot::yTicks() const {
+    QVector<double> ticks;
+    if(!zeroReference_) {for(int i=0;i<=5;++i) ticks.append(ymin_+(ymax_-ymin_)*i/5.); return ticks;}
+    const double raw=(ymax_-ymin_)/5.,scale=std::pow(10.,std::floor(std::log10(raw))),fraction=raw/scale;
+    const double step=(fraction<=1?1:fraction<=2?2:fraction<=5?5:10)*scale;
+    for(double y=std::ceil(ymin_/step)*step;y<=ymax_+step*1e-9;y+=step) ticks.append(std::abs(y)<step*1e-9?0.:y);
+    return ticks;
 }
 void Plot::paintEvent(QPaintEvent*) {
     QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing); painter.fillRect(rect(),QColor("#ffffff"));
@@ -42,7 +54,8 @@ void Plot::paintEvent(QPaintEvent*) {
         painter.setPen(QColor("#526477")); painter.drawText(QRectF(0,height()-35,width(),25),Qt::AlignCenter,yLabel_);
     } else {
         const double center=(xmin_+xmax_)/2.,half=(xmax_-xmin_)/2./zoom_; const double lo=center-half,hi=center+half;
-        for(int i=0;i<=5;++i) { const double x=plot.left()+plot.width()*i/5.,y=plot.bottom()-plot.height()*i/5.; painter.setPen(QColor("#e5ebf1")); painter.drawLine(QPointF(x,plot.top()),QPointF(x,plot.bottom())); painter.drawLine(QPointF(plot.left(),y),QPointF(plot.right(),y)); painter.setPen(QColor("#5c6d80")); painter.drawText(QRectF(x-40,plot.bottom()+7,80,22),Qt::AlignCenter,QString::number(lo+(hi-lo)*i/5.,'g',5)); painter.drawText(QRectF(2,y-11,70,22),Qt::AlignRight|Qt::AlignVCenter,QString::number(ymin_+(ymax_-ymin_)*i/5.,'g',5)); }
+        for(int i=0;i<=5;++i) { const double x=plot.left()+plot.width()*i/5.; painter.setPen(QColor("#e5ebf1")); painter.drawLine(QPointF(x,plot.top()),QPointF(x,plot.bottom())); painter.setPen(QColor("#5c6d80")); painter.drawText(QRectF(x-40,plot.bottom()+7,80,22),Qt::AlignCenter,QString::number(lo+(hi-lo)*i/5.,'g',5)); }
+        for(const double tick:yTicks()) { const double y=plot.bottom()-(tick-ymin_)/(ymax_-ymin_)*plot.height(); painter.setPen(QColor(zeroReference_&&tick==0?"#9aabbd":"#e5ebf1")); painter.drawLine(QPointF(plot.left(),y),QPointF(plot.right(),y)); painter.setPen(QColor("#5c6d80")); painter.drawText(QRectF(2,y-11,70,22),Qt::AlignRight|Qt::AlignVCenter,QString::number(tick,'g',5)); }
         painter.setPen(QColor("#a8b6c5")); painter.drawRect(plot);
         painter.save(); painter.setClipRect(plot.adjusted(-1,-1,1,1));
         for(const auto& curve:curves_) { QPainterPath path; bool begun=false; for(const auto& point:curve.points) { if(!std::isfinite(point.y())) { begun=false; continue; } const QPointF p(plot.left()+(point.x()-lo)/(hi-lo)*plot.width(),plot.bottom()-(point.y()-ymin_)/(ymax_-ymin_)*plot.height()); if(begun) path.lineTo(p); else path.moveTo(p); begun=true; } painter.setPen(QPen(curve.color,2)); painter.drawPath(path); }

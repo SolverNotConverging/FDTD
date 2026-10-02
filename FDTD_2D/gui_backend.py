@@ -19,6 +19,19 @@ from .monitors import FieldMonitor
 
 SCHEMA_VERSION=1
 
+def pulse_from_settings(settings):
+    if settings.get("pulse_mode","manual")=="auto":
+        lo=finite(settings["f_min_ghz"],"start frequency")*1e9
+        hi=finite(settings["f_max_ghz"],"stop frequency")*1e9
+        if not 0<lo<hi: raise ValueError("Automatic pulse requires 0 < fmin < fmax")
+        # Leave both spectral tails below the modal synthesis guard (1e-5),
+        # while retaining useful nonzero source power at the band endpoints.
+        return GaussianPulse((lo+hi)/2,np.sqrt(np.log(5e5))/(np.pi*(hi-lo)/2))
+    if settings.get("pulse_mode","manual")!="manual": raise ValueError("Unknown pulse mode")
+    return GaussianPulse(finite(settings.get("pulse_ghz",15),"pulse frequency")*1e9,
+        finite(settings.get("pulse_width_ps",60),"pulse width")*1e-12,
+        delay=finite(settings["pulse_delay_ps"],"pulse delay")*1e-12 if settings.get("pulse_delay_ps") else None)
+
 
 def finite(value,label):
     result=float(value)
@@ -87,7 +100,7 @@ def compile_project(project):
             config=VirtualWaveguide(int(item.get("length_cells",32)),int(item.get("pml_cells",12)),
                                    int(item.get("clearance_cells",6)))
             scene.add_port(WaveguidePort(axis=item.get("axis","x"),position=finite(item["position"],"position")*1e-3,
-                span=mm(item["span"]),normal=int(item.get("normal",1)),modes=int(item.get("modes",1)),
+                span=mm(item["span"]),normal=-int(item["inward_normal"]) if "inward_normal" in item else int(item.get("normal",1)),modes=int(item.get("modes",1)),
                 virtual_waveguide=config,mesh_step=finite(item["mesh_step_mm"],"port step")*1e-3 if item.get("mesh_step_mm") else None,**common))
         else:
             raise ValueError("Unknown port kind")
@@ -180,12 +193,14 @@ def port_mode_metadata(sim):
         modes=[]
         for m in range(guide.port.modes):
             beta=guide.beta[:,m]
-            modes.append(dict(index=m,beta_real_rad_m=beta.real,beta_imag_rad_m=beta.imag,
+            uniform=np.allclose(guide.q_modes[:,:,m],guide.q_modes[:,0:1,m],rtol=1e-8,atol=1e-12)
+            family='TEM' if sim.polarization=='TE' and uniform and all(w.is_pec for w in guide.walls) else ('TM-like' if sim.polarization=='TE' else 'TE-like')
+            modes.append(dict(index=m,family=family,beta_real_rad_m=beta.real,beta_imag_rad_m=beta.imag,
                 attenuation_np_m=-beta.imag,effective_index=beta.real/(2*np.pi*sim.frequencies/299792458.),
                 valid=guide.valid[:,m],overlap=guide.overlaps[:,m],
                 q_real=guide.q_modes[:,:,m].real,q_imag=guide.q_modes[:,:,m].imag,
                 p_real=guide.p_modes[:,:,m].real,p_imag=guide.p_modes[:,:,m].imag))
-        ports.append(dict(name=name,axis=guide.port.axis,normal=guide.port.normal,
+        ports.append(dict(name=name,axis=guide.port.axis,normal=guide.port.normal,inward_normal=-guide.port.normal,
             position_mm=guide.port.position*1e3,depth_mm=guide.port.invariant_length*1e3,
             frequencies_ghz=sim.frequencies/1e9,
             transverse_edges_mm=guide.transverse*1e3,
@@ -236,24 +251,29 @@ def run_project(project,output,preview=False,events=emit):
     if preview:
         events("complete",preview=True,path=str(output/"mesh.json")); return metadata
     settings=project.get("settings",{})
-    pulse=GaussianPulse(finite(settings.get("pulse_ghz",15),"pulse frequency")*1e9,
-                        finite(settings.get("pulse_width_ps",60),"pulse width")*1e-12,
-                        delay=finite(settings["pulse_delay_ps"],"pulse delay")*1e-12 if settings.get("pulse_delay_ps") else None)
+    pulse=pulse_from_settings(settings)
+    events("status",message=f"Pulse: {pulse.frequency/1e9:g} GHz, width {pulse.width*1e12:g} ps, delay {pulse.delay*1e9:g} ns ({settings.get('pulse_mode','manual')})")
     tolerance=lambda name:finite(settings[name],name) if settings.get(name) else None
     control=RunControl(finite(settings.get("max_time_ns",1.5),"max time")*1e-9,
         min_time=finite(settings.get("min_time_ns",0),"min time")*1e-9,
         field_tolerance=tolerance("field_tolerance"),dft_tolerance=tolerance("dft_tolerance"),check_steps=50)
-    last_frame=-np.inf; peaks={}; peak_paths={}; field_paths={}
+    snapshot_interval=finite(settings.get("time_snapshot_interval_ns",0),"time snapshot interval")*1e-9
+    if snapshot_interval<0: raise ValueError("Time snapshot interval cannot be negative")
+    last_frame=-np.inf; peaks={}; peak_paths={}; peak_steps={}; snapshots={}; last_saved={}
     def progress(info,q,p):
         nonlocal last_frame
         if (output/"cancel").exists(): raise Cancelled("Simulation cancelled")
         index=info.get("run_index",0)
         if info["energy"]>peaks.get(index,-1):
-            peaks[index]=info["energy"]; peak_paths[index]=q.copy()
+            peaks[index]=info["energy"]; peak_paths[index]=q.copy(); peak_steps[index]=info["step"]
+        if snapshot_interval>0 and info['time']-last_saved.get(index,-np.inf)>=snapshot_interval:
+            path=output/f"field_time_{index}_{info['step']}.vtu"; writer.write(path,q)
+            snapshots.setdefault(index,[]).append(dict(field_file=str(path),step=info['step'],time_ns=info['time']*1e9))
+            last_saved[index]=info['time']
         now=time.monotonic()
         if now-last_frame>=.25 or info["step"]==info["steps"]:
             field_file=output/f"field_live_{index}_{info['step']}.vtu"
-            writer.write(field_file,q); field_paths[index]=str(field_file)
+            writer.write(field_file,q)
             events("progress",**info,fraction=(index+info["step"]/info["steps"])/info.get("run_count",1),
                    field_file=str(field_file),scalar_label="Hz (A/m)" if sim.polarization=="TE" else "Ez (V/m)")
             # Keep a short live history; persistent peak/final snapshots are saved below.
@@ -295,6 +315,15 @@ def run_project(project,output,preview=False,events=emit):
                 field_label='Hz' if sim.polarization=='TE' else 'Ez',unit='A s/m' if sim.polarization=='TE' else 'V s/m'))
         final_file=output/f"field_final_{index}.vtu"; peak_file=output/f"field_peak_{index}.vtu"
         writer.write(final_file,run.scalar); writer.write(peak_file,peak_paths.get(index,run.scalar))
+        frames=snapshots.get(index,[]).copy()
+        if not frames:
+            for path in output.glob(f"field_live_{index}_*.vtu"):
+                step=int(path.stem.rsplit('_',1)[1]); frames.append(dict(field_file=str(path),step=step,time_ns=step*run.dt*1e9))
+        peak_step=peak_steps.get(index,run.steps)
+        frames.extend([dict(field_file=str(peak_file),step=peak_step,time_ns=peak_step*run.dt*1e9,label='peak energy'),
+                       dict(field_file=str(final_file),step=run.steps,time_ns=run.time*1e9,label='final')])
+        # One actual field per time instant; prefer the persistent peak/final copy.
+        frames=sorted({frame['step']:frame for frame in frames}.values(),key=lambda frame:frame['step'])
         far=run.far_field(angles)
         reference=None
         if len(run.driven_channels)==1 and run.driven_channels[0] in run.channels:
@@ -308,7 +337,7 @@ def run_project(project,output,preview=False,events=emit):
             incoming_real=run.incoming.real,incoming_imag=run.incoming.imag,outgoing_real=run.outgoing.real,outgoing_imag=run.outgoing.imag,
             far_real=far.scalar_amplitude.real,far_imag=far.scalar_amplitude.imag,power=far.power_per_radian,
             normalized_far_real=normalized.real,normalized_far_imag=normalized.imag,normalized_power=coefficient*abs(normalized)**2,
-            peak_field=str(peak_file),final_field=str(final_file),diagnostics=run.diagnostics,monitors=monitor_records)
+            peak_field=str(peak_file),peak_step=peak_step,final_field=str(final_file),time_snapshots=frames,diagnostics=run.diagnostics,monitors=monitor_records)
         records.append(record)
     result=dict(version=1,project=project,mesh=metadata,frequencies_ghz=sim.frequencies/1e9,angles_deg=angles*180/np.pi,
                 scalar_label="Hz (A/m)" if sim.polarization=="TE" else "Ez (V/m)",runs=records,**scattering)

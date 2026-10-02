@@ -13,8 +13,8 @@
     {"kind":"rectangle","name":"roof_7","x":81,"y":7,"width":19,"height":0.5,"rank":60,"material":{"type":"PEC"}}
   ],
   "ports": [
-    {"kind":"waveguide","name":"feed","axis":"x","position":8,"span":[0,7],"normal":-1,"modes":1,"rank":100,"depth_mm":1,"length_cells":32,"pml_cells":12,"clearance_cells":6},
-    {"kind":"waveguide","name":"termination","axis":"x","position":92,"span":[0,7],"normal":1,"modes":1,"rank":100,"depth_mm":1,"length_cells":32,"pml_cells":12,"clearance_cells":6}
+    {"kind":"waveguide","name":"feed","axis":"x","position":8,"span":[0,7],"inward_normal":1,"modes":1,"rank":100,"depth_mm":1,"length_cells":32,"pml_cells":12,"clearance_cells":6},
+    {"kind":"waveguide","name":"termination","axis":"x","position":92,"span":[0,7],"inward_normal":-1,"modes":1,"rank":100,"depth_mm":1,"length_cells":32,"pml_cells":12,"clearance_cells":6}
   ],
   "sources": [], "excitations": [{"name":"feed","mode":0,"amplitude":1}],
   "monitors": [

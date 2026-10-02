@@ -49,7 +49,7 @@ void PortModeView::populate() {
     const QSignalBlocker a(mode_),b(frequency_),c(component_); mode_->clear(); frequency_->clear(); component_->clear();
     const auto ports=metadata_["port_modes"].toArray(); if(port_->currentIndex()<0) { updatePlots(); return; }
     const auto p=ports[port_->currentIndex()].toObject();
-    for(const auto m:p["modes"].toArray()) mode_->addItem("Mode "+QString::number(m.toObject()["index"].toInt()));
+    for(const auto m:p["modes"].toArray()) {const auto mode=m.toObject(); const auto family=mode["family"].toString(); mode_->addItem("Mode "+QString::number(mode["index"].toInt())+(family.isEmpty()?QString():" · "+family));}
     for(const auto f:p["frequencies_ghz"].toArray()) frequency_->addItem(QString::number(f.toDouble(),'g',8)+" GHz"); frequency_->setCurrentIndex(frequency_->count()/2);
     component_->addItem(p["scalar_label"].toString(),"q"); component_->addItem(p["tangent_label"].toString(),"p"); updatePlots();
 }
@@ -57,7 +57,7 @@ void PortModeView::updatePlots() {
     if(port_->currentIndex()<0||mode_->currentIndex()<0||frequency_->currentIndex()<0) { info_->setText("Generate the mesh to solve and track waveguide modes at every frequency anchor."); field_->setMessage("No tracked waveguide modes. Older results need a new mesh preview."); curve_->setMessage("Dispersion appears after mesh generation."); return; }
     const auto p=metadata_["port_modes"].toArray()[port_->currentIndex()].toObject(),m=p["modes"].toArray()[mode_->currentIndex()].toObject();
     const int f=frequency_->currentIndex(),representation=representation_->currentIndex(); const bool valid=m["valid"].toArray()[f].toBool();
-    info_->setText(QString("%1 · Re(beta) %2, Im(beta) %3 rad/m · overlap %4 · %5\nexp(+i omega t - i beta s); alpha = -Im(beta). Tangential field follows the outward port convention.")
+    info_->setText(QString("%1 · Re(beta) %2, Im(beta) %3 rad/m · overlap %4 · %5\nexp(+i omega t - i beta s); alpha = -Im(beta). Tangential field uses the outgoing-wave basis.")
         .arg(valid?"Propagating: 1 W power normalization":"Evanescent: eigenvector scale, no power normalization")
         .arg(m["beta_real_rad_m"].toArray()[f].toDouble(),0,'g',7).arg(m["beta_imag_rad_m"].toArray()[f].toDouble(),0,'g',7).arg(m["overlap"].toArray()[f].toDouble(),0,'g',5).arg(frequency_->currentText()));
     const auto prefix=component_->currentData().toString(); const auto xs=p["transverse_mm"].toArray();

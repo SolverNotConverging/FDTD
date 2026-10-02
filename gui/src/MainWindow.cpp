@@ -4,11 +4,17 @@
 #include "FieldView.h"
 #include "Inspection.h"
 #include "Dialogs.h"
+#include "Ribbon.h"
+#include "Radiation.h"
+#include "SnapshotPlayer.h"
+#include <QRegularExpression>
+#include <QSet>
 #include <QApplication>
 #include <QAction>
 #include <QActionGroup>
 #include <QMenuBar>
 #include <QToolBar>
+#include <QToolButton>
 #include <QDockWidget>
 #include <QTreeWidget>
 #include <QTableWidget>
@@ -45,12 +51,15 @@
 #include <QPainter>
 #include <QDir>
 #include <QLineF>
+#include <QMap>
 #include <complex>
 #include <limits>
 #include <cmath>
 #include <algorithm>
 
 namespace {
+enum WorkspaceTab { ModelTab,MeshTab,PortModesTab,SParametersTab,TimeFieldsTab,FrequencyFieldsTab,FarFieldTab };
+enum FarDisplay { Directivity,Gain,RealizedGain,RelativePower,NormalizedPower,RawPower,ScalarPhase };
 double numeric(const QJsonValue& value) { return value.isDouble()?value.toDouble():std::numeric_limits<double>::quiet_NaN(); }
 QString channel(const QJsonValue& value) { const auto pair=value.toArray(); return pair[0].toString()+":"+QString::number(pair[1].toInt()); }
 const QVector<QColor> curveColors={QColor("#147eb3"),QColor("#d35c57"),QColor("#33a17e"),QColor("#9973c5"),QColor("#dd923c"),QColor("#4e667e")};
@@ -64,20 +73,20 @@ QJsonObject readJson(const QString& path,QString* error) {
 MainWindow::MainWindow(QWidget* parent):QMainWindow(parent),project_(this),worker_(this) {
     setObjectName("FDTDStudio"); resize(1450,940); setupUi();
     connect(&project_,&Project::changed,this,[this]{
-        metadata_={}; results_={}; field_->clear(); canvas_->setCompiled({});
+        metadata_={}; results_={}; mesh_->clear(); field_->clear(); canvas_->setCompiled({});
         modeView_->setMetadata({}); monitorView_->clear();
         sPlot_->setMessage("Run an S-parameter study to inspect the complete matrix."); farPlot_->setMessage("Run a simulation to inspect its closed-contour far field.");
-        fieldSnapshot_->clear(); refresh();
+        timePlayer_->clear(); refresh();
     });
     connect(project_.undoStack(),&QUndoStack::cleanChanged,this,[this]{setWindowModified(project_.dirty());});
     connect(&worker_,&QProcess::readyReadStandardOutput,this,&MainWindow::consume);
     connect(&worker_,&QProcess::readyReadStandardError,this,[this]{appendLog(QString::fromUtf8(worker_.readAllStandardError()));});
     connect(&worker_,&QProcess::errorOccurred,this,[this](QProcess::ProcessError error){
-        if(error==QProcess::FailedToStart) { jobFailed_=true; appendLog("Could not start Python. Set the interpreter in Simulation > Python runtime."); runAction_->setEnabled(true); previewAction_->setEnabled(true); cancelAction_->setEnabled(false); canvas_->setEnabled(true); drives_->setEnabled(true); amplitude_->setEnabled(true); emit jobFinished(false); }
+        if(error==QProcess::FailedToStart) { jobFailed_=true; appendLog("Could not start Python. Set the interpreter in Simulation > Python runtime."); runAction_->setEnabled(true); previewAction_->setEnabled(true); cancelAction_->setEnabled(false); canvas_->setEnabled(true); drives_->setEnabled(true); amplitude_->setEnabled(true); modeSelector_->setEnabled(true); emit jobFinished(false); }
     });
     connect(&worker_,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,[this](int code,QProcess::ExitStatus status){
         consume(); runAction_->setEnabled(true); previewAction_->setEnabled(true); cancelAction_->setEnabled(false);
-        canvas_->setEnabled(true); drives_->setEnabled(true); amplitude_->setEnabled(true);
+        canvas_->setEnabled(true); drives_->setEnabled(true); amplitude_->setEnabled(true); modeSelector_->setEnabled(true);
         const bool ok=code==0&&status==QProcess::NormalExit&&gotComplete_&&!jobFailed_&&!jobCancelled_;
         statusBar()->showMessage(jobCancelled_?"Simulation cancelled":ok?"Completed":"Simulation failed — see the log",15000);
         if(ok) progress_->setValue(1000); else progress_->setValue(0);
@@ -101,11 +110,11 @@ void MainWindow::setupUi() {
     auto* remove=edit->addAction("Delete selected item"); remove->setShortcut(QKeySequence::Delete); connect(remove,&QAction::triggered,this,&MainWindow::deleteSelected);
     auto* geometry=menuBar()->addMenu("&Model");
     for(const auto& kind:{QString("rectangle"),QString("circle"),QString("polygon"),QString("sheet")}) { auto* action=geometry->addAction("Add "+kind+"…"); connect(action,&QAction::triggered,this,[this,kind]{add("objects",kind);}); }
-    geometry->addSeparator();
-    for(const auto& kind:{QString("lumped"),QString("waveguide")}) { auto* action=geometry->addAction("Add "+kind+" port…"); connect(action,&QAction::triggered,this,[this,kind]{add("ports",kind);}); }
-    auto* plane=geometry->addAction("Add plane wave…"); connect(plane,&QAction::triggered,this,[this]{add("sources","plane");});
-    auto* monitor=geometry->addAction("Add field monitor…"); connect(monitor,&QAction::triggered,this,[this]{add("monitors","monitor");});
     auto* simulation=menuBar()->addMenu("&Simulation"); auto* configure=simulation->addAction("Settings…"); connect(configure,&QAction::triggered,this,&MainWindow::settings);
+    for(const auto& kind:{QString("lumped"),QString("waveguide")}) { auto* action=simulation->addAction("Add "+kind+" port…"); connect(action,&QAction::triggered,this,[this,kind]{add("ports",kind);}); }
+    auto* plane=simulation->addAction("Add plane wave…"); connect(plane,&QAction::triggered,this,[this]{add("sources","plane");});
+    auto* monitor=simulation->addAction("Add field monitor…"); connect(monitor,&QAction::triggered,this,[this]{add("monitors","monitor");});
+    simulation->addSeparator();
     previewAction_=simulation->addAction("Generate mesh"); previewAction_->setShortcut(Qt::Key_F6); connect(previewAction_,&QAction::triggered,this,[this]{start(true);});
     runAction_=simulation->addAction("Run simulation"); runAction_->setShortcut(Qt::Key_F5); connect(runAction_,&QAction::triggered,this,[this]{start();});
     cancelAction_=simulation->addAction("Stop"); cancelAction_->setObjectName("cancelSimulation"); cancelAction_->setEnabled(false); connect(cancelAction_,&QAction::triggered,this,&MainWindow::cancel);
@@ -114,14 +123,17 @@ void MainWindow::setupUi() {
     for(const auto& pair:{qMakePair(QString("PEC cylinder / plane wave"),QString("cylinder")),qMakePair(QString("Matched two-port guide"),QString("waveguide")),qMakePair(QString("Thin-film mixed geometry"),QString("thin-film")),qMakePair(QString("Periodic leaky-wave antenna"),QString("leaky-wave"))}) { auto* action=examples->addAction(pair.first); connect(action,&QAction::triggered,this,[this,pair]{chooseExample(pair.second);}); }
     auto* help=menuBar()->addMenu("&Help"); auto* doc=help->addAction("Documentation"); connect(doc,&QAction::triggered,this,[this]{QDesktopServices::openUrl(QUrl::fromLocalFile(sourceRoot()+"/gui/README.md"));});
     auto* about=help->addAction("About FDTD Studio"); connect(about,&QAction::triggered,this,[this]{QMessageBox::about(this,"FDTD Studio","Native C++ / Qt / VTK modelling and result inspection.\nGeometry-first conformal TE/TM reference solver.\nCoordinates: mm · Frequency: GHz · Time: ns\nQt and VTK are dynamically linked; see gui/THIRD_PARTY.md.");});
-    auto* toolbar=addToolBar("Model tools"); toolbar->setObjectName("modelToolbar"); toolbar->setMovable(false); toolbar->addAction(configure); toolbar->addAction(previewAction_); toolbar->addAction(runAction_); toolbar->addAction(cancelAction_); toolbar->addSeparator();
+    auto* toolbar=addToolBar("Command ribbon"); toolbar->setObjectName("commandRibbonToolbar"); toolbar->setMovable(false); toolbar->setFloatable(false); toolbar->setAllowedAreas(Qt::TopToolBarArea);
+    toolbar->setStyleSheet("QToolBar{padding:0px;spacing:0px;border:0px;}");
+    ribbon_=new Ribbon; toolbar->addWidget(ribbon_);
     auto* tools=new QActionGroup(this); tools->setExclusive(true);
+    QMap<QString,QAction*> drawing;
     for(const auto& pair:{qMakePair(QString("Select / move"),QString("select")),qMakePair(QString("Rectangle"),QString("rectangle")),qMakePair(QString("Circle"),QString("circle")),qMakePair(QString("Polygon"),QString("polygon")),qMakePair(QString("Sheet"),QString("sheet")),qMakePair(QString("Lumped"),QString("lumped")),qMakePair(QString("Guide port"),QString("waveguide")),qMakePair(QString("Monitor"),QString("monitor"))}) {
-        auto* action=toolbar->addAction(pair.first); action->setCheckable(true); action->setData(pair.second); tools->addAction(action); if(pair.second=="select") action->setChecked(true);
-        connect(action,&QAction::triggered,this,[this,pair]{canvas_->setTool(pair.second); tabs_->setCurrentIndex(0); statusBar()->showMessage(pair.second=="polygon"?"Click vertices; right-click to finish. Esc cancels.":"Draw in the model view. Wheel zooms; select mode pans and moves items.",12000);});
+        auto* action=new QAction(pair.first,this); action->setObjectName("draw_"+pair.second); action->setCheckable(true); action->setData(pair.second); tools->addAction(action); drawing[pair.second]=action; if(pair.second=="select") action->setChecked(true);
+        connect(action,&QAction::triggered,this,[this,pair]{canvas_->setTool(pair.second); tabs_->setCurrentIndex(ModelTab); statusBar()->showMessage(pair.second=="polygon"?"Click vertices; right-click to finish. Esc cancels.":"Draw in the model view. Wheel zooms; select mode pans and moves items.",12000);});
     }
-    auto* fit=toolbar->addAction("Fit"); connect(fit,&QAction::triggered,this,[this]{canvas_->fitModel(); field_->fit();});
-    auto* snap=new QDoubleSpinBox; snap->setRange(0,100); snap->setDecimals(3); snap->setValue(.1); snap->setSuffix(" mm snap"); toolbar->addWidget(snap);
+    auto* fit=new QAction("Fit model / mesh / field",this); connect(fit,&QAction::triggered,this,[this]{canvas_->fitModel(); mesh_->fit(); field_->fit();});
+    auto* snap=new QDoubleSpinBox; snap->setRange(0,100); snap->setDecimals(3); snap->setValue(.1); snap->setSuffix(" mm"); snap->setFixedWidth(116); snap->setToolTip("Drawing snap spacing in mm (0 disables snapping)");
     tabs_=new QTabWidget; canvas_=new Canvas; tabs_->addTab(canvas_,"Model"); setCentralWidget(tabs_);
     connect(snap,qOverload<double>(&QDoubleSpinBox::valueChanged),canvas_,&Canvas::setSnap);
     connect(canvas_,&Canvas::selected,this,&MainWindow::select); connect(canvas_,&Canvas::moved,&project_,&Project::move);
@@ -136,22 +148,63 @@ void MainWindow::setupUi() {
         else if(kind=="waveguide") { const bool x=std::abs(points[1].y()-points[0].y())>std::abs(points[1].x()-points[0].x()); object["axis"]=x?"x":"y"; object["position"]=x?points[0].x():points[0].y(); const double a=x?points[0].y():points[0].x(),b=x?points[1].y():points[1].x(); object["span"]=QJsonArray{std::min(a,b),std::max(a,b)}; }
         add(kind=="monitor"?"monitors":kind=="lumped"||kind=="waveguide"?"ports":"objects",kind,object);
     });
-    auto* fieldPage=new QWidget; auto* fl=new QVBoxLayout(fieldPage); auto* fieldTools=new QHBoxLayout;
-    fieldSnapshot_=new QComboBox; fieldSnapshot_->setMinimumWidth(200); fieldTools->addWidget(new QLabel("Snapshot")); fieldTools->addWidget(fieldSnapshot_,1);
+    auto* meshPage=new QWidget; meshPage->setObjectName("meshPage"); auto* ml=new QVBoxLayout(meshPage); auto* meshTools=new QHBoxLayout;
+    meshTools->addWidget(new QLabel("Simulation mesh · retained conformal cells"),1); auto* meshImage=new QPushButton("Export PNG"); meshTools->addWidget(meshImage); ml->addLayout(meshTools);
+    mesh_=new FieldView; mesh_->setObjectName("meshView"); ml->addWidget(mesh_,1); tabs_->addTab(meshPage,"Mesh");
+    connect(meshImage,&QPushButton::clicked,this,[this]{const auto path=QFileDialog::getSaveFileName(this,"Export mesh image",{},"PNG image (*.png)"); if(!path.isEmpty()&&!mesh_->savePng(path)) QMessageBox::warning(this,"Export failed","Could not write the image.");});
+    auto* fieldPage=new QWidget; fieldPage->setObjectName("timeFieldsPage"); auto* fl=new QVBoxLayout(fieldPage); auto* fieldTools=new QHBoxLayout;
+    timePlayer_=new SnapshotPlayer; fieldSnapshot_=timePlayer_->selector(); fieldTools->addWidget(timePlayer_,1);
     auto* edges=new QCheckBox("Cell edges"); fieldTools->addWidget(edges); auto* fieldImage=new QPushButton("Export PNG"); fieldTools->addWidget(fieldImage); fl->addLayout(fieldTools);
-    field_=new FieldView; fl->addWidget(field_,1); tabs_->addTab(fieldPage,"Mesh & fields"); connect(edges,&QCheckBox::toggled,field_,&FieldView::setEdges); connect(fieldSnapshot_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{updateField();});
+    field_=new FieldView; fl->addWidget(field_,1); connect(edges,&QCheckBox::toggled,field_,&FieldView::setEdges); connect(fieldSnapshot_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{updateField();});
     connect(fieldImage,&QPushButton::clicked,this,[this]{const auto path=QFileDialog::getSaveFileName(this,"Export field image",{},"PNG image (*.png)"); if(!path.isEmpty()&&!field_->savePng(path)) QMessageBox::warning(this,"Export failed","Could not write the image.");});
     auto* sPage=new QWidget; auto* sl=new QVBoxLayout(sPage); auto* sTools=new QHBoxLayout; incoming_=new QComboBox; sRepresentation_=new QComboBox; sRepresentation_->addItems({"Magnitude (dB)","Phase (deg)","Real","Imaginary"}); sTools->addWidget(new QLabel("Incident channel")); sTools->addWidget(incoming_,1); sTools->addWidget(sRepresentation_);
-    sPlot_=new Plot; auto* sCsv=new QPushButton("CSV"); auto* sPng=new QPushButton("PNG"); sTools->addWidget(sCsv); sTools->addWidget(sPng); sl->addLayout(sTools); sl->addWidget(sPlot_,1); tabs_->addTab(sPage,"S parameters");
+    sPlot_=new Plot; auto* sCsv=new QPushButton("CSV"); auto* sPng=new QPushButton("PNG"); sTools->addWidget(sCsv); sTools->addWidget(sPng); sl->addLayout(sTools); sl->addWidget(sPlot_,1);
     connect(incoming_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{updateS();}); connect(sRepresentation_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{updateS();}); connect(sCsv,&QPushButton::clicked,this,[this]{exportPlot(sPlot_,false);}); connect(sPng,&QPushButton::clicked,this,[this]{exportPlot(sPlot_,true);});
-    auto* farPage=new QWidget; auto* ffl=new QVBoxLayout(farPage); auto* farTools=new QHBoxLayout; farRun_=new QComboBox; farFrequency_=new QComboBox; farRepresentation_=new QComboBox; farRepresentation_->addItems({"Relative power (dB)","Power / incident W","Raw DFT power","Scalar phase (deg)"}); farTools->addWidget(farRun_,1); farTools->addWidget(farFrequency_); farTools->addWidget(farRepresentation_);
-    farPlot_=new Plot; auto* farCsv=new QPushButton("CSV"); auto* farPng=new QPushButton("PNG"); farTools->addWidget(farCsv); farTools->addWidget(farPng); ffl->addLayout(farTools); ffl->addWidget(farPlot_,1); tabs_->addTab(farPage,"Far field");
+    auto* farPage=new QWidget; auto* ffl=new QVBoxLayout(farPage); auto* farTools=new QHBoxLayout; farRun_=new QComboBox; farFrequency_=new QComboBox; farRepresentation_=new QComboBox; farRepresentation_->setObjectName("farFieldDisplay"); farRepresentation_->addItems({"Directivity (dB, 2D)","Gain (dB, 2D)","Realized gain (dB, 2D)","Relative power (dB)","Power / incident W","Raw DFT power","Scalar phase (deg)"}); farTools->addWidget(farRun_,1); farTools->addWidget(farFrequency_); farTools->addWidget(farRepresentation_);
+    farRepresentation_->setToolTip("2D circular normalization: D = 2π U / radiated power; G = 2π U / accepted feed power; realized G = 2π U / incident feed power. Gain requires port-only excitation.");
+    farPlot_=new Plot; auto* farCsv=new QPushButton("CSV"); auto* farPng=new QPushButton("PNG"); farTools->addWidget(farCsv); farTools->addWidget(farPng); ffl->addLayout(farTools); ffl->addWidget(farPlot_,1);
     for(auto* combo:{farRun_,farFrequency_,farRepresentation_}) connect(combo,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{updateFar();}); connect(farCsv,&QPushButton::clicked,this,[this]{exportPlot(farPlot_,false);}); connect(farPng,&QPushButton::clicked,this,[this]{exportPlot(farPlot_,true);});
     modeView_=new PortModeView; tabs_->addTab(modeView_,"Port modes");
+    tabs_->addTab(sPage,"S parameters"); tabs_->addTab(fieldPage,"Time fields");
     monitorView_=new FrequencyFieldView; tabs_->addTab(monitorView_,"Frequency fields");
-    auto* showMesh=new QCheckBox("Show mesh"); showMesh->setObjectName("showSimulationMesh"); showMesh->setChecked(true); toolbar->addWidget(showMesh);
+    tabs_->addTab(farPage,"Far field");
+    auto* showMesh=new QCheckBox("Show mesh"); showMesh->setObjectName("showSimulationMesh"); showMesh->setChecked(true);
     connect(showMesh,&QCheckBox::toggled,canvas_,&Canvas::setShowMesh);
-    edges->setChecked(true);
+    const int modelPage=ribbon_->addPage("Model"),simulationPage=ribbon_->addPage("Simulation"),resultPage=ribbon_->addPage("Post-Processing"),viewPage=ribbon_->addPage("View");
+    auto* selection=ribbon_->addGroup(modelPage,"Selection"); selection->addCommand(drawing["select"],"Select /\nmove","select"); selection->addCommand(fit,"Fit view","fit");
+    auto* shapes=ribbon_->addGroup(modelPage,"Shapes");
+    for(const auto& kind:{QString("rectangle"),QString("circle"),QString("polygon"),QString("sheet")}) shapes->addCommand(drawing[kind],kind=="sheet"?"Thin sheet":drawing[kind]->text(),kind);
+    auto* editing=ribbon_->addGroup(modelPage,"Edit / materials"); editing->addCommand(property,"Properties","edit"); editing->addCommand(remove,"Delete","delete");
+    property->setToolTip("Edit geometry, material, rank or the selected port / monitor");
+    auto* history=ribbon_->addGroup(modelPage,"History"); history->addCommand(edit->actions()[0],"Undo","undo"); history->addCommand(edit->actions()[1],"Redo","redo");
+    auto* placement=ribbon_->addGroup(modelPage,"Placement"); auto* snapBox=new QWidget; auto* snapLayout=new QVBoxLayout(snapBox); snapLayout->setContentsMargins(3,0,3,0); snapLayout->addWidget(new QLabel("Snap spacing")); snapLayout->addWidget(snap); placement->addControl(snapBox);
+    auto* settingGroup=ribbon_->addGroup(simulationPage,"Settings"); settingGroup->addCommand(configure,"Simulation\nsettings","settings"); settingGroup->addCommand(runtime,"Python\nruntime","settings");
+    auto* modeBox=new QWidget; auto* modeLayout=new QVBoxLayout(modeBox); modeLayout->setContentsMargins(3,0,3,0); modeLayout->addWidget(new QLabel("Field mode"));
+    modeSelector_=new QComboBox; modeSelector_->setObjectName("simulationFieldMode"); modeSelector_->addItem("Ez","TM"); modeSelector_->addItem("Hz","TE"); modeSelector_->setMinimumWidth(72); modeSelector_->setToolTip("Ez: electric field out of plane. Hz: magnetic field out of plane; PEC parallel plates support TEM."); modeLayout->addWidget(modeSelector_); settingGroup->addControl(modeBox);
+    connect(modeSelector_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{
+        if(refreshing_||running()) return;
+        auto data=project_.data(); auto settings=data["settings"].toObject(); settings["polarization"]=modeSelector_->currentData().toString(); data["settings"]=settings; project_.replace(data,"Change field mode");
+    });
+    auto* sources=ribbon_->addGroup(simulationPage,"Sources and ports"); sources->addCommand(drawing["waveguide"],"Waveguide\nport","waveguide"); sources->addCommand(drawing["lumped"],"Lumped\nport","lumped"); sources->addCommand(plane,"Plane wave","plane");
+    auto* monitors=ribbon_->addGroup(simulationPage,"Monitors"); monitors->addCommand(drawing["monitor"],"Field\nmonitor","monitor");
+    auto navigate=[this](const QString& title,int index){auto* action=new QAction(title,this); connect(action,&QAction::triggered,this,[this,index]{tabs_->setCurrentIndex(index);}); return action;};
+    auto* meshView=navigate("Inspect the simulation mesh",MeshTab); auto* timeFields=navigate("Inspect time-domain field snapshots",TimeFieldsTab); auto* portModes=navigate("Tracked port modes and dispersion",PortModesTab);
+    auto* meshGroup=ribbon_->addGroup(simulationPage,"Mesh"); meshGroup->addCommand(previewAction_,"Generate\nmesh","mesh"); meshGroup->addCommand(meshView,"Mesh view","mesh"); meshGroup->addControl(showMesh);
+    auto* solver=ribbon_->addGroup(simulationPage,"Solver"); solver->addCommand(runAction_,"Run\nF5","run"); solver->addCommand(cancelAction_,"Stop","stop");
+    auto* tracking=ribbon_->addGroup(simulationPage,"Mode tracking"); tracking->addCommand(portModes,"Port modes","modes");
+    auto* fields=ribbon_->addGroup(resultPage,"Fields"); fields->addCommand(timeFields,"Time fields","fields"); fields->addCommand(navigate("Inspect frequency fields and harmonic animation",FrequencyFieldsTab),"Frequency\nfields","monitor");
+    auto* network=ribbon_->addGroup(resultPage,"Network"); network->addCommand(navigate("Inspect the S-parameter matrix",SParametersTab),"S parameters","plot"); network->addCommand(portModes,"Modes /\ndispersion","modes");
+    auto* radiation=ribbon_->addGroup(resultPage,"Radiation"); radiation->addCommand(navigate("Inspect closed-contour far fields",FarFieldTab),"Far field","far");
+    auto* dataGroup=ribbon_->addGroup(resultPage,"Results"); dataGroup->addCommand(openResult,"Open results","open"); dataGroup->addCommand(folder,"Run folder","open");
+    auto* viewGroup=ribbon_->addGroup(viewPage,"View"); viewGroup->addCommand(navigate("Show model geometry",ModelTab),"Model view","rectangle"); viewGroup->addCommand(fit,"Fit view","fit");
+    auto* meshVisibility=new QAction("Show simulation mesh",this); meshVisibility->setCheckable(true); meshVisibility->setChecked(true);
+    connect(meshVisibility,&QAction::toggled,showMesh,&QCheckBox::setChecked); connect(showMesh,&QCheckBox::toggled,meshVisibility,&QAction::setChecked); viewGroup->addCommand(meshVisibility,"Show mesh","mesh");
+    auto* quick=new QWidget; auto* quickLayout=new QHBoxLayout(quick); quickLayout->setContentsMargins(4,0,8,0); quickLayout->setSpacing(2);
+    for(const auto& pair:{qMakePair(fresh,QString("new")),qMakePair(open,QString("open")),qMakePair(save,QString("save")),qMakePair(edit->actions()[0],QString("undo")),qMakePair(edit->actions()[1],QString("redo"))}) {
+        if(pair.first->icon().isNull()) pair.first->setIcon(Ribbon::icon(pair.second));
+        auto* button=new QToolButton(quick); button->setDefaultAction(pair.first); button->setAutoRaise(true); button->setIconSize(QSize(18,18)); quickLayout->addWidget(button);
+    }
+    menuBar()->setCornerWidget(quick,Qt::TopRightCorner);
     auto* modelDock=new QDockWidget("Model tree",this); tree_=new QTreeWidget; tree_->setHeaderLabels({"Item","Material / kind","Rank"}); tree_->setColumnWidth(0,130); modelDock->setWidget(tree_); addDockWidget(Qt::LeftDockWidgetArea,modelDock); modelDock->setMinimumWidth(285);
     connect(tree_,&QTreeWidget::itemSelectionChanged,this,[this]{if(refreshing_) return; const auto selected=tree_->selectedItems(); if(selected.isEmpty()) return; auto* item=selected.first(); select(item->data(0,Qt::UserRole).toString(),item->data(0,Qt::UserRole+1).toInt());}); connect(tree_,&QTreeWidget::itemDoubleClicked,this,[this]{editSelected();});
     auto* propDock=new QDockWidget("Properties",this); auto* propPage=new QWidget; auto* pl=new QVBoxLayout(propPage); properties_=new QTableWidget(0,2); properties_->setHorizontalHeaderLabels({"Property","Value"}); properties_->horizontalHeader()->setStretchLastSection(true); properties_->verticalHeader()->hide(); properties_->setEditTriggers(QAbstractItemView::NoEditTriggers); pl->addWidget(properties_); auto* editButton=new QPushButton("Edit selected…"); pl->addWidget(editButton); connect(editButton,&QPushButton::clicked,this,&MainWindow::editSelected); propDock->setWidget(propPage); addDockWidget(Qt::RightDockWidgetArea,propDock); propDock->setMinimumWidth(280);
@@ -161,8 +214,10 @@ void MainWindow::setupUi() {
     connect(amplitude_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this](double value){if(refreshing_||!drives_->currentItem()) return; drives_->currentItem()->setData(Qt::UserRole+1,value); updateDrives();});
     auto* logDock=new QDockWidget("Simulation log",this); auto* logPage=new QWidget; auto* ll=new QVBoxLayout(logPage); summary_=new QLabel("Place objects and ports, then generate the domain and mesh."); summary_->setWordWrap(true); ll->addWidget(summary_); log_=new QPlainTextEdit; log_->setReadOnly(true); log_->setMaximumBlockCount(2500); ll->addWidget(log_); logDock->setWidget(logPage); addDockWidget(Qt::BottomDockWidgetArea,logDock); logDock->setMaximumHeight(230);
     modelDock->setObjectName("modelDock"); propDock->setObjectName("propertiesDock"); driveDock->setObjectName("excitationDock"); logDock->setObjectName("logDock");
+    auto* panels=ribbon_->addGroup(viewPage,"Panels");
+    panels->addCommand(modelDock->toggleViewAction(),"Model tree","polygon"); panels->addCommand(propDock->toggleViewAction(),"Properties","edit"); panels->addCommand(driveDock->toggleViewAction(),"Excitations","waveguide"); panels->addCommand(logDock->toggleViewAction(),"Run log","plot");
     coordinates_=new QLabel("Coordinates in mm"); progress_=new QProgressBar; progress_->setRange(0,1000); progress_->setMaximumWidth(250); statusBar()->addPermanentWidget(coordinates_); statusBar()->addPermanentWidget(progress_);
-    connect(tabs_,&QTabWidget::currentChanged,this,[this](int index){if(index==1) field_->render(); if(index==5) monitorView_->render();});
+    connect(tabs_,&QTabWidget::currentChanged,this,[this](int index){if(index==MeshTab) mesh_->render(); if(index==TimeFieldsTab) {updateField(); field_->render();} if(index==FrequencyFieldsTab) monitorView_->render();});
 }
 QString MainWindow::sourceRoot() const { return QDir::cleanPath(QString::fromUtf8(FDTD_SOURCE_ROOT)); }
 QString MainWindow::python() const {
@@ -190,14 +245,17 @@ void MainWindow::refresh() {
     for(const auto& value:project_.items("ports")) { const auto port=value.toObject(); const bool guide=port["kind"].toString()=="waveguide"; for(int i=0;i<(guide?port["modes"].toInt(1):1);++i) addDrive(port["name"].toString(),i,guide?"sqrt(W)":"V"); }
     for(const auto& value:project_.items("sources")) addDrive(value.toObject()["name"].toString(),0,"V/m");
     if(drives_->count()) drives_->setCurrentRow(std::clamp(driveRow,0,drives_->count()-1));
-    const auto s=project_.settings(); summary_->setText(QString("%1 · %2–%3 GHz · %4 ns max · %5\nDomain and PML generated from objects; NTFF always closed.").arg(s["polarization"].toString()).arg(s["f_min_ghz"].toDouble()).arg(s["f_max_ghz"].toDouble()).arg(s["max_time_ns"].toDouble()).arg(s["study"].toString()=="sparameters"?"Full S matrix":"Coherent excitations"));
+    const auto s=project_.settings(); {const QSignalBlocker blocker(modeSelector_); modeSelector_->setCurrentIndex(s["polarization"].toString()=="TE"?1:0);}
+    summary_->setText(QString("%1 · %2–%3 GHz · %4 ns max · %5\nDomain and PML generated from objects; NTFF always closed.").arg(s["polarization"].toString()=="TE"?"Hz":"Ez").arg(s["f_min_ghz"].toDouble()).arg(s["f_max_ghz"].toDouble()).arg(s["max_time_ns"].toDouble()).arg(s["study"].toString()=="sparameters"?"Full S matrix":"Coherent excitations"));
     setWindowTitle(project_.data()["title"].toString("FDTD model")+"[*] — FDTD Studio"); setWindowModified(project_.dirty()); refreshing_=false;
 }
 void MainWindow::select(const QString& category,int index) {
     selectedCategory_=category; selectedIndex_=index; canvas_->select(category,index);
     const QSignalBlocker blocker(tree_);
     for(int r=0;r<tree_->topLevelItemCount();++r) for(int i=0;i<tree_->topLevelItem(r)->childCount();++i) { auto* item=tree_->topLevelItem(r)->child(i); if(item->data(0,Qt::UserRole).toString()==category&&item->data(0,Qt::UserRole+1).toInt()==index) { tree_->setCurrentItem(item); break; } }
-    auto object=project_.item(category,index); properties_->setRowCount(object.size()); int row=0;
+    auto object=project_.item(category,index);
+    if(object["kind"].toString()=="waveguide"&&object.contains("normal")&&!object.contains("inward_normal")) {object["inward_normal"]=-object["normal"].toInt(1); object.remove("normal");}
+    properties_->setRowCount(object.size()); int row=0;
     for(auto i=object.begin();i!=object.end();++i) {
         QString value=i.value().isString()?i.value().toString():i.value().isDouble()?QString::number(i.value().toDouble(),'g',10):QString::fromUtf8(QJsonDocument(i.value().isObject()?QJsonDocument(i.value().toObject()):QJsonDocument(i.value().toArray())).toJson(QJsonDocument::Compact));
         properties_->setItem(row,0,new QTableWidgetItem(i.key())); properties_->setItem(row,1,new QTableWidgetItem(value)); ++row;
@@ -249,7 +307,7 @@ void MainWindow::start(bool preview) {
     QStringList arguments{"-m","FDTD_2D.gui_backend","--project",runDirectory_+"/project.fdtd.json","--output",runDirectory_}; if(preview) arguments<<"--preview";
     runAction_->setEnabled(false); previewAction_->setEnabled(false); cancelAction_->setEnabled(true); progress_->setValue(0); appendLog((preview?"Generate mesh":"Run simulation")+QString(" · ")+interpreter); appendLog("Output: "+runDirectory_);
     worker_.start(interpreter,arguments); statusBar()->showMessage("Compiling geometry and ranked mesh…");
-    canvas_->setEnabled(false); drives_->setEnabled(false); amplitude_->setEnabled(false);
+    canvas_->setEnabled(false); drives_->setEnabled(false); amplitude_->setEnabled(false); modeSelector_->setEnabled(false);
 }
 void MainWindow::consume() {
     pending_+=worker_.readAllStandardOutput(); int newline;
@@ -257,6 +315,8 @@ void MainWindow::consume() {
 }
 void MainWindow::loadMetadata(const QJsonObject& data) {
     metadata_=data; canvas_->setCompiled(data); modeView_->setMetadata(data);
+    const auto meshPath=data["field_file"].toString(); mesh_->clear();
+    mesh_->loadMesh(QFileInfo::exists(meshPath)?meshPath:runDirectory_+"/"+QFileInfo(meshPath).fileName());
     summary_->setText(QString("Mesh %1 × %2 · dt %3 ps · %4 scalar / %5 vector DOFs\n%6 split DOFs · %7 enlarged groups · %8 rejected anchors · %9 fallbacks").arg(data["shape"].toArray()[0].toInt()).arg(data["shape"].toArray()[1].toInt()).arg(data["dt_ps"].toDouble(),0,'g',6).arg(data["scalar_dofs"].toInt()).arg(data["vector_dofs"].toInt()).arg(data["split_dofs"].toInt()).arg(data["enlarged_groups"].toInt()).arg(data["rejected_anchors"].toArray().size()).arg(data["fallbacks"].toArray().size()));
     if(data["rejected_anchors"].toArray().size()) appendLog("Rejected anchors: "+QString::fromUtf8(QJsonDocument(data["rejected_anchors"].toArray()).toJson(QJsonDocument::Compact)));
     if(data["fallbacks"].toArray().size()) appendLog("Staircase fallback: "+QString::fromUtf8(QJsonDocument(data["fallbacks"].toArray()).toJson(QJsonDocument::Compact)));
@@ -265,14 +325,15 @@ void MainWindow::handleEvent(const QJsonObject& data) {
     const auto type=data["event"].toString();
     if(type=="status") { appendLog(data["message"].toString()); statusBar()->showMessage(data["message"].toString()); }
     else if(type=="compiled") {
-        loadMetadata(data); fieldSnapshot_->clear(); fieldSnapshot_->addItem("Mesh · permittivity",data["field_file"].toString()); field_->load(data["field_file"].toString(),"epsilon_r",false);
+        loadMetadata(data); timePlayer_->clear(); field_->clear();
         appendLog(summary_->text());
     }
     else if(type=="progress") {
         progress_->setValue(int(data["fraction"].toDouble()*1000)); statusBar()->showMessage(QString("Run %1/%2 · step %3/%4 · %5 ns").arg(data["run_index"].toInt()+1).arg(data["run_count"].toInt(1)).arg(data["step"].toInt()).arg(data["steps"].toInt()).arg(data["time"].toDouble()*1e9,0,'f',3));
-        if(tabs_->currentIndex()==1) field_->load(data["field_file"].toString(),data["scalar_label"].toString());
+        timePlayer_->setLiveSnapshot({QString("Live · run %1 · %2 ns").arg(data["run_index"].toInt()+1).arg(data["time"].toDouble()*1e9,0,'f',3),data["field_file"].toString(),data["scalar_label"].toString(),data["run_index"].toInt(),data["step"].toInt(),data["time"].toDouble()*1e9});
+        if(tabs_->currentIndex()==TimeFieldsTab) updateField();
     }
-    else if(type=="complete") { gotComplete_=true; if(data["preview"].toBool()) { tabs_->setCurrentIndex(1); field_->fit(); } else { openResults(data["path"].toString()); appendLog("Results, CSV, NPZ and field snapshots saved."); } }
+    else if(type=="complete") { gotComplete_=true; if(data["preview"].toBool()) { tabs_->setCurrentIndex(MeshTab); mesh_->fit(); } else { openResults(data["path"].toString()); appendLog("Results, CSV, NPZ and field snapshots saved."); } }
     else if(type=="error") { jobFailed_=true; appendLog("ERROR: "+data["message"].toString()); }
     else if(type=="cancelled") { jobCancelled_=true; appendLog(data["message"].toString()); }
 }
@@ -287,19 +348,43 @@ bool MainWindow::openResults(const QString& path) {
     results_=data; runDirectory_=QFileInfo(path).absolutePath(); loadMetadata(data["mesh"].toObject());
     // Resolve paths relative to the selected run directory when a run was moved.
     auto resolve=[this](const QString& original){return QFileInfo::exists(original)?original:runDirectory_+"/"+QFileInfo(original).fileName();};
+    QVector<TimeSnapshot> frames;
     { const QSignalBlocker a(incoming_),b(farRun_),c(farFrequency_),d(fieldSnapshot_);
         incoming_->clear(); for(const auto value:data["channels"].toArray()) incoming_->addItem(channel(value));
-        farRun_->clear(); fieldSnapshot_->clear(); fieldSnapshot_->addItem("Mesh · permittivity",resolve(data["mesh"].toObject()["field_file"].toString()));
-        const auto runs=data["runs"].toArray(); for(int i=0;i<runs.size();++i) { const auto run=runs[i].toObject(); QStringList driven; for(const auto value:run["driven_channels"].toArray()) driven<<channel(value); farRun_->addItem("Run "+QString::number(i+1)+" · "+driven.join(" + ")); fieldSnapshot_->addItem("Run "+QString::number(i+1)+" · peak energy",resolve(run["peak_field"].toString())); fieldSnapshot_->addItem("Run "+QString::number(i+1)+" · final",resolve(run["final_field"].toString())); appendLog(QString("Run %1: %2 steps, %3 ns, %4").arg(i+1).arg(run["steps"].toInt()).arg(run["time_ns"].toDouble(),0,'g',6).arg(run["stop_reason"].toString())); }
-        farFrequency_->clear(); const auto frequencies=data["frequencies_ghz"].toArray(); for(const auto value:frequencies) farFrequency_->addItem(QString::number(value.toDouble(),'g',7)+" GHz"); farFrequency_->setCurrentIndex(frequencies.size()/2); if(fieldSnapshot_->count()>1) fieldSnapshot_->setCurrentIndex(1);
+        farRun_->clear();
+        const auto runs=data["runs"].toArray(); for(int i=0;i<runs.size();++i) {
+            const auto run=runs[i].toObject(); QStringList driven; for(const auto value:run["driven_channels"].toArray()) driven<<channel(value); farRun_->addItem("Run "+QString::number(i+1)+" · "+driven.join(" + "));
+            QSet<QString> added;
+            auto append=[&](const QString& original,const QString& label,int step,double timeNs) {
+                const auto path=resolve(original); if(added.contains(path)||!QFileInfo::exists(path)) return; added.insert(path);
+                frames.append({QString("Run %1 · %2").arg(i+1).arg(label),path,data["scalar_label"].toString("Scalar field"),i,step,timeNs});
+            };
+            append(run["peak_field"].toString(),"peak energy",run["peak_step"].toInt(-1),0);
+            append(run["final_field"].toString(),"final",run["steps"].toInt(),run["time_ns"].toDouble());
+            for(const auto item:run["time_snapshots"].toArray()) {const auto frame=item.toObject(); append(frame["field_file"].toString(),QString("%1 ns · step %2").arg(frame["time_ns"].toDouble(),0,'g',6).arg(frame["step"].toInt()),frame["step"].toInt(),frame["time_ns"].toDouble());}
+            if(run["time_snapshots"].toArray().isEmpty()) {
+                for(const auto& file:QDir(runDirectory_).entryList({QString("field_live_%1_*.vtu").arg(i)},QDir::Files)) {
+                    bool valid; const int step=file.section('_',-1).chopped(4).toInt(&valid);
+                    if(valid) append(runDirectory_+"/"+file,QString("step %1").arg(step),step,run["time_ns"].toDouble()*step/std::max(1,run["steps"].toInt()));
+                }
+            }
+            appendLog(QString("Run %1: %2 steps, %3 ns, %4").arg(i+1).arg(run["steps"].toInt()).arg(run["time_ns"].toDouble(),0,'g',6).arg(run["stop_reason"].toString()));
+        }
+        farFrequency_->clear(); const auto frequencies=data["frequencies_ghz"].toArray(); for(const auto value:frequencies) farFrequency_->addItem(QString::number(value.toDouble(),'g',7)+" GHz"); farFrequency_->setCurrentIndex(frequencies.size()/2);
     }
+    timePlayer_->setSnapshots(frames); if(frames.isEmpty()) field_->clear();
     updateS(); updateFar(); updateField(); monitorView_->setResults(data,runDirectory_); if(!same) canvas_->fitModel(); return true;
 }
-void MainWindow::updateField() { if(fieldSnapshot_->currentIndex()<0) return; field_->load(fieldSnapshot_->currentData().toString(),fieldSnapshot_->currentIndex()==0?"epsilon_r":results_["scalar_label"].toString("Scalar field"),fieldSnapshot_->currentIndex()!=0); }
+void MainWindow::updateField() {
+    if(fieldSnapshot_->currentIndex()<0) return;
+    const auto liveLabel=fieldSnapshot_->currentData(Qt::UserRole+1).toString();
+    field_->load(fieldSnapshot_->currentData().toString(),liveLabel.isEmpty()?results_["scalar_label"].toString("Scalar field"):liveLabel);
+}
 void MainWindow::updateS() {
     if(results_.isEmpty()||results_["s_real"].isNull()) { sPlot_->setMessage("S parameters require a full independent-port study. Coherent runs provide incoming and outgoing waves in results.json."); return; }
     const int incident=incoming_->currentIndex(); if(incident<0) return; const auto frequencies=results_["frequencies_ghz"].toArray(),real=results_["s_real"].toArray(),imag=results_["s_imag"].toArray(),labels=results_["channels"].toArray();
     QVector<Curve> curves; const int representation=sRepresentation_->currentIndex();
+    sPlot_->setZeroReference(representation==0);
     for(int out=0;out<labels.size();++out) { Curve curve{channel(labels[out])+" ← "+channel(labels[incident]),{},curveColors[out%curveColors.size()]};
         for(int f=0;f<frequencies.size();++f) { const double r=numeric(real[f].toArray()[out].toArray()[incident]),i=numeric(imag[f].toArray()[out].toArray()[incident]); const std::complex<double> z(r,i); double y;
             if(!std::isfinite(r)||!std::isfinite(i)) y=std::numeric_limits<double>::quiet_NaN(); else y=representation==0?20*std::log10(std::max(std::abs(z),1e-15)):representation==1?std::arg(z)*180./3.141592653589793:representation==2?r:i;
@@ -311,13 +396,26 @@ void MainWindow::updateS() {
 void MainWindow::updateFar() {
     if(results_.isEmpty()||farRun_->currentIndex()<0||farFrequency_->currentIndex()<0) return;
     const auto run=results_["runs"].toArray()[farRun_->currentIndex()].toObject(); const int f=farFrequency_->currentIndex(),representation=farRepresentation_->currentIndex();
-    const auto angles=results_["angles_deg"].toArray(); const auto powers=run[representation==1?"normalized_power":"power"].toArray()[f].toArray();
+    const auto angles=results_["angles_deg"].toArray(); const auto powers=run[representation==NormalizedPower?"normalized_power":"power"].toArray()[f].toArray();
     const auto real=run["far_real"].toArray()[f].toArray(),imag=run["far_imag"].toArray()[f].toArray();
     double peak=0; for(const auto p:powers) if(p.isDouble()) peak=std::max(peak,p.toDouble());
+    const auto metrics=radiationMetrics(results_,farRun_->currentIndex(),f);
+    if(representation<=RealizedGain) {
+        const auto error=representation==Directivity?metrics.directivityUnavailable:representation==Gain?metrics.gainUnavailable:metrics.realizedGainUnavailable;
+        if(!error.isEmpty()) {farPlot_->setMessage(error);return;}
+    }
     Curve curve{farRun_->currentText(),{},curveColors[0]};
-    for(int a=0;a<angles.size();++a) { double y=numeric(powers[a]); if(representation==0) y=peak>0?std::max(-60.,10*std::log10(std::max(y/peak,1e-30))):std::numeric_limits<double>::quiet_NaN(); else if(representation==3) y=std::arg(std::complex<double>(numeric(real[a]),numeric(imag[a])))*180./3.141592653589793; curve.points.append({angles[a].toDouble(),y}); }
-    const QString title=representation==0?"Relative power (dB)":representation==1?"W/rad per incident W":representation==2?"Raw DFT power (W s²/rad)":"Scalar phase (deg)";
-    farPlot_->setCurves({curve},"Angle (deg)",title,representation!=3);
+    for(int a=0;a<angles.size();++a) {
+        double y=numeric(powers[a]);
+        if(representation<=RealizedGain) {
+            const auto& values=representation==Directivity?metrics.directivity:representation==Gain?metrics.gain:metrics.realizedGain;
+            y=values[a]; if(std::isfinite(y)) y=10*std::log10(std::max(y,1e-30));
+        } else if(representation==RelativePower) y=peak>0?std::max(-60.,10*std::log10(std::max(y/peak,1e-30))):std::numeric_limits<double>::quiet_NaN();
+        else if(representation==ScalarPhase) y=std::arg(std::complex<double>(numeric(real[a]),numeric(imag[a])))*180./3.141592653589793;
+        curve.points.append({angles[a].toDouble(),y});
+    }
+    const QString title=representation<=RelativePower?farRepresentation_->currentText():representation==NormalizedPower?"W/rad per incident W":representation==RawPower?"Raw DFT power (W s²/rad)":"Scalar phase (deg)";
+    farPlot_->setCurves({curve},"Angle (deg)",title,representation!=ScalarPhase);
 }
 void MainWindow::exportPlot(Plot* plot,bool image) {
     const auto path=QFileDialog::getSaveFileName(this,image?"Export plot image":"Export plot samples",{},image?"PNG image (*.png)":"CSV data (*.csv)"); if(path.isEmpty()) return;
@@ -328,12 +426,29 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if(!discardChanges()) { event->ignore(); return; } QSettings().setValue("geometry",saveGeometry()); QSettings().setValue("layout",saveState()); event->accept();
 }
 bool MainWindow::smokeImages(const QString& directory) {
-    QDir().mkpath(directory); canvas_->fitModel(); tabs_->setCurrentIndex(0); QApplication::processEvents(); bool ok=grab().save(directory+"/model.png");
-    tabs_->setCurrentIndex(1); field_->fit(); QApplication::processEvents(); ok=field_->savePng(directory+"/field.png")&&ok; ok=grab().save(directory+"/field-ui.png")&&ok;
-    tabs_->setCurrentIndex(2); QApplication::processEvents(); ok=grab().save(directory+"/sparameters.png")&&ok;
-    tabs_->setCurrentIndex(3); QApplication::processEvents(); ok=grab().save(directory+"/far-field.png")&&ok;
-    tabs_->setCurrentIndex(4); QApplication::processEvents(); ok=grab().save(directory+"/port-modes.png")&&ok;
-    tabs_->setCurrentIndex(5); monitorView_->fit(); QApplication::processEvents(); ok=grab().save(directory+"/frequency-fields.png")&&ok;
+    QDir().mkpath(directory); canvas_->fitModel(); tabs_->setCurrentIndex(ModelTab); ribbon_->setCurrentPage(0); QApplication::processEvents(); bool ok=grab().save(directory+"/model.png");
+    ribbon_->setCurrentPage(1); QApplication::processEvents(); ok=grab().save(directory+"/simulation-ribbon.png")&&ok;
+    ribbon_->setCurrentPage(3); QApplication::processEvents(); ok=grab().save(directory+"/view-ribbon.png")&&ok;
+    ribbon_->setCurrentPage(2);
+    tabs_->setCurrentIndex(MeshTab); mesh_->fit(); QApplication::processEvents(); ok=mesh_->savePng(directory+"/mesh.png")&&ok; ok=grab().save(directory+"/mesh-ui.png")&&ok;
+    // Switching the time snapshot must leave the independent mesh view intact.
+    tabs_->setCurrentIndex(TimeFieldsTab); field_->fit(); QApplication::processEvents(); ok=field_->savePng(directory+"/field.png")&&ok; ok=grab().save(directory+"/field-ui.png")&&ok;
+    if(fieldSnapshot_->count()>1) { fieldSnapshot_->setCurrentIndex(1); QApplication::processEvents(); ok=grab().save(directory+"/final-field-ui.png")&&ok; }
+    auto* timePlay=timePlayer_->findChild<QPushButton*>("playTimeFields");
+    if(timePlay->isEnabled()) {
+        const int before=fieldSnapshot_->currentIndex(); timePlay->setChecked(true); QEventLoop cycle;
+        QTimer::singleShot(160,&cycle,&QEventLoop::quit); cycle.exec(); timePlay->setChecked(false);
+        ok=(fieldSnapshot_->currentIndex()!=before)&&ok; ok=grab().save(directory+"/time-animation.png")&&ok;
+    }
+    tabs_->setCurrentIndex(MeshTab); QApplication::processEvents(); ok=grab().save(directory+"/mesh-after-snapshot.png")&&ok;
+    tabs_->setCurrentIndex(SParametersTab); QApplication::processEvents(); ok=grab().save(directory+"/sparameters.png")&&ok;
+    tabs_->setCurrentIndex(FarFieldTab); QApplication::processEvents(); ok=grab().save(directory+"/far-field.png")&&ok;
+    for(const auto& option:{qMakePair(int(Gain),QString("gain")),qMakePair(int(RealizedGain),QString("realized-gain"))}) {
+        farRepresentation_->setCurrentIndex(option.first); QApplication::processEvents(); ok=grab().save(directory+"/far-field-"+option.second+".png")&&ok;
+    }
+    farRepresentation_->setCurrentIndex(Directivity);
+    tabs_->setCurrentIndex(PortModesTab); QApplication::processEvents(); ok=grab().save(directory+"/port-modes.png")&&ok;
+    tabs_->setCurrentIndex(FrequencyFieldsTab); monitorView_->fit(); QApplication::processEvents(); ok=grab().save(directory+"/frequency-fields.png")&&ok;
     if(!results_["runs"].toArray().isEmpty()&&!results_["runs"].toArray()[0].toObject()["monitors"].toArray().isEmpty()) {
         for(int phase:{0,90,180}) { ok=monitorView_->setPhase(phase)&&ok; QApplication::processEvents(); ok=monitorView_->savePng(directory+"/harmonic-"+QString::number(phase)+".png")&&ok; }
         auto* play=monitorView_->findChild<QPushButton*>("playMonitor"); auto* phase=monitorView_->findChild<QSlider*>("monitorPhase");

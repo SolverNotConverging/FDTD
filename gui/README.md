@@ -32,6 +32,16 @@ No PyQt, PySide, Python VTK package, web browser or JavaScript UI is needed.
 
 ## Model and run
 
+The CST-inspired command ribbon separates **Model** (selection, shapes,
+properties/materials, undo/redo and snap spacing) from **Simulation** (settings,
+sources/ports, field monitors, mesh generation, solver and tracked modes).
+**Post-Processing** opens field, S-parameter, dispersion and far-field views;
+**View** controls mesh visibility and dock panels. The ribbon tabs are independent
+of the workspace/result tabs, ordered **Model, Mesh, Port modes, S parameters,
+Time fields, Frequency fields, Far field**. Quick access buttons provide new/open/save/undo/redo;
+the native menus and F5/F6 shortcuts remain available. Narrow windows can scroll
+the ribbon horizontally to reach every group.
+
 * Draw rectangles, circles, polygons and zero-thickness sheets using the toolbar,
   or use **Model > Add…** for precise coordinates. Finish polygons with a
   right-click. Esc cancels drawing. The wheel zooms; empty-space dragging pans.
@@ -41,23 +51,33 @@ No PyQt, PySide, Python VTK package, web browser or JavaScript UI is needed.
 * Material choices include PEC, exact infinite-SIBC PMC, isotropic dielectric,
   constant or fitted conducting SIBC, resistive film and finite-thickness thin
   metal. Transmissive films require sheet geometry.
-* Add lumped terminals or matched virtual waveguide ports. TM lumped terminals
-  are out-of-plane point terminals; TE uses an axis-aligned voltage line.
+* Add lumped terminals or matched virtual waveguide ports. Ez lumped terminals
+  are out-of-plane point terminals; Hz uses an axis-aligned voltage line.
   Waveguide apertures must lie in a straight resolved cross-section and end on
-  physical walls. The port normal points out of the device. All ports use a
+  physical walls. The port normal points into the device. New projects store
+  `inward_normal`; legacy `normal` values retain their outward convention and
+  are converted for display/editing. All ports use a
   common invariant depth for compatible power normalization.
-* **Settings** defines TE/TM polarization, frequency band, pulse, nonuniform
+* The **Simulation** ribbon has a direct **Ez / Hz** field-mode selector.
+  Ez selects the out-of-plane electric field; Hz selects the out-of-plane
+  magnetic field and supports the parallel-plate TEM fundamental mode.
+  Saved projects retain the solver's original convention (`TM` = Ez, `TE` = Hz),
+  so loading an existing model preserves its physics. New empty models use Hz.
+* **Settings** defines Ez/Hz field mode, frequency band, pulse, nonuniform
   mesh/CFL limits and stopping criteria. Coordinates are **mm**, frequency
   **GHz**, pulse width **ps**, and run duration **ns**. Physics is converted to
   SI by the worker. The simulation domain, PML and closed measurement boxes
   are generated after object placement.
+  **Auto from frequency band** chooses a Gaussian carrier at the band center,
+  its width from the bandwidth, and a six-width delay. Manual pulse controls
+  remain available; existing projects without `pulse_mode` retain manual pulses.
 * **Generate mesh / F6** compiles without running. **Show mesh** displays the
   actual nonuniform X/Y lines over the geometry and can hide them while editing.
   These are simulation lines, separate from the adaptive drawing grid.
   The model view shows domain,
   closed NTFF, optional TF/SF and physical bounds. The log reports dt, DOFs,
   rejected anchors, enlargement and staircase fallbacks. VTK shows retained
-  conformal polygons; enable **Cell edges** to inspect them.
+  conformal polygons as a plain wireframe in the dedicated **Mesh** tab.
 * **Run / F5** starts a worker process. A full S study independently drives every
   monitored port mode. A coherent run uses checked transmitting channels and
   their amplitudes; all ports receive. The UI stays responsive and shows live
@@ -81,7 +101,8 @@ invariant depth; evanescent modes retain eigenvector scaling. The displayed
 dispersion belongs to the straight port cross-section, including spatial/time
 discretization; it is not a Bloch dispersion solve of the complete antenna.
 
-Add **Model > Add field monitor** or draw a rectangle with the **Monitor** tool.
+Add **Simulation > Add field monitor** or draw a rectangle with the ribbon's
+**Simulation > Field monitor** tool.
 Set a comma-separated, increasing frequency list in GHz. Monitors are measurement
 regions: they do not change material, add mesh anchors, or expand the automatic
 domain. A region must fit the generated domain and contain retained field cells.
@@ -91,11 +112,18 @@ save/load and deletion support undo/redo.
 
 ## Inspect results
 
-**Mesh & fields** provides permittivity, a peak-energy scalar snapshot and final
-scalar fields for every drive. VTK retains separate sheet-side field values;
+**Mesh** shows only the simulation cell wireframe, without field coloring or a
+snapshot selector. **Time fields** provides the live scalar field while running,
+and a snapshot selector for the saved fields of every drive. **Play / Pause**
+and the fps control replay timed snapshots chronologically within the selected
+drive. Set **Save time fields every (ns)** in Run settings to keep an interval
+history, sampled at solver progress checks. Zero retains recent live history
+plus peak and final fields; older runs can replay any remaining timed snapshots.
+Its optional **Cell edges** overlay can be enabled for field inspection.
+VTK retains separate sheet-side field values;
 it does not average distinct conformal states into a Cartesian display cell.
-TE displays `Hz` (A/m) and TM `Ez` (V/m). Field snapshots exclude virtual guides.
-VTK interaction supports zoom/pan and the toolbar's **Fit** resets the view.
+Hz displays A/m and Ez displays V/m. Field snapshots exclude virtual guides.
+VTK interaction supports zoom/pan and **Model / View > Fit view** resets the view.
 
 **Frequency fields** selects a run, regional monitor and frequency. Displays
 the complex scalar DFT as magnitude, real, imaginary or phase, on polygons clipped
@@ -115,16 +143,40 @@ exports the currently displayed phase.
 
 **S parameters** selects an incident channel and plots every outgoing channel.
 Magnitude in dB, wrapped phase, real and imaginary representations are available.
+Magnitude plots always include a labeled **0 dB** tick.
 Invalid frequency bins remain gaps. Hover for values, wheel to zoom the frequency
 axis, and double-click to reset. CSV exports retain invalid gaps.
 
-**Far field** selects a run and frequency. Available plots are relative power
-in dB, power per incident watt for a single excited port, raw Fourier power,
-and scalar phase. Angles are degrees measured counterclockwise from +X.
+**Far field** selects a run, frequency and display: **Directivity**, **Gain**,
+**Realized gain** (all in dB using 2D circular normalization), relative power,
+power per incident watt for a single excited port, raw Fourier power, or scalar
+phase. Angles are degrees measured counterclockwise from +X.
+With `U` the power per radian, `D = 2*pi*U / P_radiated`,
+`G = 2*pi*U / P_accepted`, and `G_realized = 2*pi*U / P_incident`.
+Radiated power is integrated over the entire 360-degree pattern using its actual
+angle spacing; the repeated endpoint is included only through that integration.
+These are cylindrical 2D metrics, not three-dimensional dBi values.
+The [accepted-power gain definition](https://www.comsol.com/blogs?p=200191)
+and [incident-power realized-gain definition](https://ansyshelp.ansys.com/public/views/secured/electronics/v261/en/subsystems/hfss/Content/HFSS/PeakRealizedGain.htm)
+are applied with a `2*pi` circular reference for this solver.
+
+For port-only runs, incident power is the sum of measured incoming modal wave
+powers at driven physical ports. Accepted power subtracts outgoing power in
+**all propagating modes at those feed ports**, including converted reflected
+modes. Tracked modes below cutoff are excluded from real power sums. Matched
+receiving ports are loads; their outgoing power is not subtracted as feed
+reflection. The same normalization supports coherent excitation of several
+ports. Gain is unavailable at nonpositive accepted power or weak/invalid source
+bins; realized gain requires a valid incident spectrum. Plane-wave and mixed
+plane-wave/port runs have no defined feed-power gain. Directivity remains
+available when their angular radiation pattern is complete and nonzero.
+Absolute dB plots retain their actual peak level with a 60 dB radial display span.
+
 Raw Fourier power carries units W*s²/radian. Port normalization divides by the
-measured incoming wave and yields W/radian per incident W. Coherent multi-source
-and plane-wave runs provide relative patterns/raw spectra; a single incident
-port power normalization is unavailable. An exactly nonradiating guide can have
+measured incoming wave and yields W/radian per incident W. This legacy display
+requires a single excited port; the gain displays also support coherent port-only
+drives. Plane-wave runs provide directivity, relative patterns and raw spectra.
+An exactly nonradiating guide can have
 no finite relative pattern. The underlying continuous-background 2D NTFF has
 finite-grid error and retains the solver's validation limits.
 
@@ -140,6 +192,8 @@ Each job is saved under `gui/runs/<timestamp>-<id>/`:
 * `sparameters.npz` and `sparameters.csv`: full matrix studies.
 * `fields_and_far_field.npz`, `far_field.csv`: native fields and angular spectra.
 * `field_peak_*.vtu`, `field_final_*.vtu`: persistent inspection snapshots.
+* `field_time_<run>_<step>.vtu`: requested interval snapshots; `time_snapshots`
+  in `results.json` records actual step numbers and physical times.
 * `monitor_<run>_<region>_<frequency>.vtu`: clipped real, imaginary, magnitude and
   phase cell arrays. `monitor_<run>_<region>.npz` retains complex DFTs, frequencies,
   native group indices/centers and SI region bounds.

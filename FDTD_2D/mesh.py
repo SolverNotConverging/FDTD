@@ -148,7 +148,7 @@ class MeshPolicy:
             ends = [Anchor(axis, v, 2**63-1, "domain", "boundary") for v in span]
             accepted = ends[:]
             candidates = sorted((r for r in requests if r.axis == axis),
-                                key=lambda r: (-r.rank, r.position, r.owner, r.reason))
+                                key=lambda r: (-r.rank, 0 if r.reason=="port" else 1, r.position, r.owner, r.reason))
             tolerance = 1e-12*(span[1]-span[0])
             for request in candidates:
                 if not span[0] <= request.position <= span[1]:

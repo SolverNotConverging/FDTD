@@ -14,6 +14,7 @@ class FieldView : public QWidget {
 public:
     explicit FieldView(QWidget* parent=nullptr);
     bool load(const QString& path,const QString& title,bool signedField=true,const QString& array="field");
+    bool loadMesh(const QString& path);
     bool setHarmonicPhase(double degrees);
     void clear(); void fit(); void setEdges(bool value);
     bool savePng(const QString& path);

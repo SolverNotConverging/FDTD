@@ -48,7 +48,8 @@ bool FieldView::load(const QString& path,const QString& title,bool signedField,c
         auto animated=vtkSmartPointer<vtkDoubleArray>::New(); animated->DeepCopy(real); animated->SetName("animated"); data->GetCellData()->AddArray(animated);
     }
     auto* scalars=data->GetCellData()->GetArray(array.toUtf8().constData()); if(!scalars) return false;
-    mapper_->SetInputData(data); mapper_->SetScalarModeToUseCellFieldData(); mapper_->SelectColorArray(array.toUtf8().constData());
+    mapper_->SetInputData(data); mapper_->ScalarVisibilityOn(); actor_->GetProperty()->SetRepresentationToSurface();
+    mapper_->SetScalarModeToUseCellFieldData(); mapper_->SelectColorArray(array.toUtf8().constData());
     double range[2]; scalars->GetRange(range);
     if(array=="animated") { data->GetCellData()->GetArray("magnitude")->GetRange(range); range[0]=-range[1]; }
     if(signedField) { const double a=std::max({std::abs(range[0]),std::abs(range[1]),1e-30}); range[0]=-a; range[1]=a; }
@@ -60,6 +61,16 @@ bool FieldView::load(const QString& path,const QString& title,bool signedField,c
     }
     mapper_->SetScalarRange(range); colors_->SetRange(range); legend_->SetTitle(title.toUtf8().constData());
     actor_->SetVisibility(true); legend_->SetVisibility(true);
+    if(empty_) { renderer_->ResetCamera(); renderer_->GetActiveCamera()->ParallelProjectionOn(); empty_=false; }
+    render(); return true;
+}
+bool FieldView::loadMesh(const QString& path) {
+    if(!QFileInfo::exists(path)) return false;
+    auto reader=vtkSmartPointer<vtkXMLUnstructuredGridReader>::New(); const auto filename=path.toUtf8(); reader->SetFileName(filename.constData()); reader->Update();
+    auto* data=reader->GetOutput(); if(!data||!data->GetNumberOfCells()) return false;
+    mapper_->SetInputData(data); mapper_->ScalarVisibilityOff();
+    actor_->GetProperty()->SetRepresentationToWireframe(); actor_->GetProperty()->SetColor(.24,.32,.40);
+    actor_->SetVisibility(true); legend_->SetVisibility(false);
     if(empty_) { renderer_->ResetCamera(); renderer_->GetActiveCamera()->ParallelProjectionOn(); empty_=false; }
     render(); return true;
 }

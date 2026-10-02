@@ -342,6 +342,24 @@ class AutomaticDomainAndRadiationTests(unittest.TestCase):
         np.testing.assert_allclose(sim.waveguides['a'].distances[:,0],sim.waveguides['a'].distances[:,1],rtol=1e-7)
         self.assertIsNotNone(sim.ntff)
 
+    def test_moved_matched_ports_keep_planes_and_continue_device_spacing(self):
+        for position in (.0003,.0171,.0175,.0177):
+            with self.subTest(position=position):
+                scene=Scene(); scene.rectangle('lower',(0,.024),(-.002,0),PEC); scene.rectangle('upper',(0,.024),(.012,.014),PEC)
+                scene.add_port(WaveguidePort('a','x',position,(0,.012),normal=-1)); scene.add_port(WaveguidePort('b','x',.018,(0,.012),normal=1))
+                policy=MeshPolicy(.001,40e9,min_step=.00025,cells_per_wavelength=10,growth=2)
+                sim=FDTD2D(scene,mesh_policy=policy,polarization='TE',frequencies=[30e9])
+                self.assertLess(np.min(abs(sim.mesh.x-position)),1e-12); self.assertLess(np.min(abs(sim.mesh.x-.018)),1e-12)
+                guide=sim.waveguides['a']; np.testing.assert_allclose(guide.distances[:,0],guide.distances[:,1],rtol=1e-7)
+
+    def test_unequal_matched_port_cells_remain_matched_for_tem(self):
+        scene=Scene((0,.024),(0,.012))
+        scene.add_port(WaveguidePort('a','x',.006,(0,.012),normal=-1)); scene.add_port(WaveguidePort('b','x',.018,(0,.012),normal=1))
+        lines=np.sort(np.r_[np.linspace(0,.024,25),.0056,.0184])
+        sim=FDTD2D(scene,mesh=Mesh(lines,np.linspace(0,.012,13)),polarization='TE',frequencies=np.linspace(20e9,40e9,21))
+        run=sim.run(RunControl(2e-9),{'a':GaussianPulse(30e9,1.5e-10)})
+        s,valid=run.s_column(('a',0)); self.assertTrue(valid[10]); self.assertLess(abs(s[10,0]),.015); self.assertLess(abs(abs(s[10,1])-1),.015)
+
     def test_objects_generate_domain_pml_and_closed_ntff(self):
         scene=Scene()
         scene.circle('pec',(.003,-.002),.001,PEC,rank=30)

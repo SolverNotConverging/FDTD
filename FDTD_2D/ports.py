@@ -209,6 +209,11 @@ class CompiledWaveguide:
         self.transverse = transverse[np.r_[retained,retained[-1]+1]]
         self.left,self.right,self.vector = map(lambda v:np.asarray(v,int),(self.left,self.right,self.vector))
         self.sign = np.array(self.sign); self.distances=np.array(self.distances)
+        if port.virtual_waveguide is not None:
+            # The physical outside cell is replaced by a virtual cell. Continue
+            # the device-side spacing, not the unrelated outside mesh spacing.
+            inside=0 if port.normal==1 else 1
+            self.distances[:,1-inside]=self.distances[:,inside]
         self.materials=np.array(materials)
         # Determine physical side-wall laws by sampling just outside the retained aperture.
         walls = []

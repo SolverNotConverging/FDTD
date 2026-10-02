@@ -19,10 +19,10 @@ QJsonObject Project::empty() {
     return QJsonObject{{"version",1},{"units","mm"},{"title","Untitled model"},
         {"objects",QJsonArray{}},{"ports",QJsonArray{}},{"sources",QJsonArray{}},{"excitations",QJsonArray{}},{"monitors",QJsonArray{}},
         {"background",QJsonObject{{"epsilon_r",1.},{"mu_r",1.}}},
-        {"settings",QJsonObject{{"polarization","TM"},{"study","sparameters"},{"f_min_ghz",10.},
+        {"settings",QJsonObject{{"polarization","TE"},{"study","sparameters"},{"pulse_mode","auto"},{"time_snapshot_interval_ns",0.},{"f_min_ghz",10.},
             {"f_max_ghz",20.},{"frequency_count",41},{"max_step_mm",1.},{"min_step_mm",.2},
             {"min_dt_ps",0.},{"cells_per_wavelength",20},{"growth",2.},{"pml_cells",8},
-            {"clearance_wavelengths",.25},{"max_time_ns",1.5},{"min_time_ns",0.},
+            {"clearance_wavelengths",.25},{"max_time_ns",5.},{"min_time_ns",0.},
             {"pulse_ghz",15.},{"pulse_width_ps",60.},{"pulse_delay_ps",0.},
             {"field_tolerance",1e-5},{"dft_tolerance",1e-4},{"enlargement",.3},{"fallback",true}}}};
 }

@@ -55,7 +55,7 @@ void Canvas::setProject(const QJsonObject& project) {
                 const QPointF a=x?QPointF(p,-span[0].toDouble()):QPointF(span[0].toDouble(),-p);
                 const QPointF b=x?QPointF(p,-span[1].toDouble()):QPointF(span[1].toDouble(),-p);
                 path.moveTo(a); path.lineTo(b);
-                const auto center=(a+b)/2.; const int normal=object["normal"].toInt(1);
+                const auto center=(a+b)/2.; const int normal=object.contains("inward_normal")?object["inward_normal"].toInt():-object["normal"].toInt(1);
                 const QPointF direction=x?QPointF(normal*.9,0):QPointF(0,-normal*.9);
                 path.moveTo(center-direction); path.lineTo(center+direction);
                 const QPointF perpendicular(-direction.y(),direction.x());
