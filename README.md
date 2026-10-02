@@ -10,6 +10,35 @@ coordinates, units, and APIs are different.
 
 ## Choose a solver
 
+### Native modelling and inspection application
+
+`gui/` contains **FDTD Studio**, a C++17 Qt/VTK desktop application for geometry,
+materials, matched/lumped ports, simulation control, conformal field inspection,
+S-parameter plots and closed-NTFF far fields. The existing solver runs in a
+separate Python process. See [GUI build and usage](gui/README.md).
+
+```powershell
+.\gui\build\fdtd-studio.exe
+```
+
+### Geometry-first nonuniform 2D reference
+
+`FDTD_2D.FDTD2D` combines TE/TM, ranked geometry-driven nonuniform meshing,
+split thin PEC and transmissive SIBC sheets, conformal boundaries with connected
+cell enlargement and reported staircase fallback, infinite-SIBC PMC, lumped
+and tracked broadband waveguide ports with matched virtual guides, complete
+mixed-port S matrices, automatic object-based domains and CPML, closed NTFF,
+plane-wave TF/SF, and field/DFT convergence stopping. It is a new CPU reference implementation
+with explicit material, port-plane and PML restrictions. See
+[general 2D documentation](doc/general_2d.md) for examples and validation scope.
+
+```bash
+python -m pip install -r requirements-general-2d.txt
+python -m FDTD_2D.example_general
+python -m FDTD_2D.example_waveguide
+python -m FDTD_2D.example_scattering
+```
+
 ### Conventional Cartesian material FDTD
 
 These solvers model user-defined materials, geometry, sources, boundaries, and

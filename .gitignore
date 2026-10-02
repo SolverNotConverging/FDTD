@@ -47,6 +47,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.test-deps/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -77,6 +78,11 @@ Thumbs.db
 *.pyd
 
 # Generated simulation outputs
+.gui-tools/
+.gui-deps/
+aqtinstall.log
+gui/build/
+gui/runs/
 output/
 *.npz
 *.h5
