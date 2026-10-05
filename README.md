@@ -38,6 +38,12 @@ The Cython build requires a supported C compiler. Cartesian Ez/Hz
 Use `config("python")` explicitly for their reference loops. GPU execution
 additionally requires a working CUDA runtime.
 
+All established solvers show terminal progress by default. Pass `progress=False`
+to suppress it. Python runs use tqdm; compiled Ez/Hz runs use a native terminal
+bar. GPU progress tracks completed work through nonblocking CUDA queries,
+without synchronization calls or progress-related field transfers. The run
+returns after completion and the result readback.
+
 See [shared conventions](FDTD_common/docs/general.md) and the
 [compiled 2D runtime guide](FDTD_common/docs/compiled_2d/compiled_2d.md).
 

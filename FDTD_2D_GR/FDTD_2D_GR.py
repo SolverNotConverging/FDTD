@@ -789,7 +789,7 @@ class FDTD_2D_GR:
         record_stride: int = 10,
         store_snapshots: bool = False,
         snapshot_quantity: str = "energy",
-        progress: bool = False,
+        progress: bool = True,
     ) -> Dict[str, np.ndarray | list]:
         """Run the solver and return centroid, energy, and optional field history."""
 
@@ -837,8 +837,8 @@ class FDTD_2D_GR:
                 progress_bar = tqdm(
                     total=int(steps), desc="Schwarzschild FDTD", unit="step"
                 )
-            except ImportError:
-                pass
+            except ImportError as exc:
+                raise ImportError("Simulation progress display requires tqdm.") from exc
 
         completed = 0
         try:

@@ -520,7 +520,7 @@ class FDTD_1D:
     def _pulse(self, t) -> float | Any:
         return self.src_amplitude * np.exp(-((t - self.src_t0) / self.src_tw) ** 2)
 
-    def run(self):
+    def run(self, *, progress=True):
         if self.src_index is None:
             raise RuntimeError("Call add_source() before run().")
         self._init_mEy_mHx()
@@ -540,7 +540,8 @@ class FDTD_1D:
         dispersive = self._ade_Ey is not None and self._ade_Ey.dispersive
 
         # Add tqdm progress bar around the loop
-        for t_index in tqdm(range(self.Nt), desc="Running simulation", unit="step"):
+        for t_index in tqdm(range(self.Nt), desc="Running simulation", unit="step",
+                            disable=not progress, mininterval=0.2):
             self.H_Update()
 
             if self.src_index is not None:

@@ -34,12 +34,15 @@ source timing, monitor windows, and recording cadence. Cython replays the graph
 and waits for completion without Python calls.
 
 `run(..., progress=True)` enables a native terminal bar showing completed steps,
-percentage, and elapsed stepping time. It is off by default. Updates are limited
+percentage, and elapsed stepping time. It is on by default. Updates are limited
 to five per second, plus the initial and final display; CPU timing is checked
 every 64 steps. GPU progress queries at most 128 preallocated, timing-disabled
 [CUDA completion events](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EVENT.html),
-spaced at least 1024 steps apart, outside the timestep graph. It reports completed
+spaced across the run, outside the timestep graph. It reports completed
 work and introduces no field copies, Python callbacks, or batch synchronization.
+Event and stream queries return immediately. After submission, the CPU polls
+completion before reading results; no CUDA stream/device synchronization call
+is issued for progress or normal graph completion.
 Events are released with the graph, including on failure. The bar starts after
 setup/compilation and reaches 100% after stepping; downloads and post-processing
 follow. Updates can be coarser when individual steps are expensive.

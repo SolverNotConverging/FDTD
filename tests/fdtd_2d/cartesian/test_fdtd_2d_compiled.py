@@ -127,7 +127,7 @@ class TestCompiledCPU(unittest.TestCase):
                     self.assertTrue(display.endswith('\n'))
                     assert_state(self, actual, reference)
                     with capture_native_stderr() as output:
-                        actual.run(is_include_history=False)
+                        actual.run(is_include_history=False, progress=False)
                         output.seek(0)
                         self.assertEqual(output.read(), b'')
 

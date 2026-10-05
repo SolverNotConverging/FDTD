@@ -213,7 +213,7 @@ outside all scatterers and inside the PML.
 Run, animation, and persistence
 -------------------------------
 
-``run(progress=True)`` enables a throttled terminal progress bar (native for
+``run()`` shows a throttled terminal progress bar by default (native for
 CPU/GPU execution). Progress is off by default. Set ``is_include_history=False`` when full
 field animation history is unnecessary. Otherwise:
 

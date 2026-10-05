@@ -246,18 +246,10 @@ def run_gpu(sim, steps, stride, progress=True, progress_desc="3D FDTD"):
         "record_count": len(record_steps),
     }
 
-    iterator = range(steps)
-    progress_bar = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm
-        except ImportError as exc:
-            raise ImportError("Simulation progress display requires tqdm.") from exc
-        progress_bar = tqdm(iterator, desc=str(progress_desc), unit="step",
-                            dynamic_ncols=True)
-        iterator = progress_bar
+    from FDTD_common.progress import GpuProgress
+    reporter = GpuProgress(cuda, steps, progress, progress_desc)
     try:
-        for step in iterator:
+        for step in range(steps):
             _update_h[blocks, THREADS_3D](
                 state["Ex"], state["Ey"], state["Ez"],
                 state["Hx"], state["Hy"], state["Hz"],
@@ -293,10 +285,10 @@ def run_gpu(sim, steps, stride, progress=True, progress_desc="3D FDTD"):
                     state["Ex"], state["Ey"], state["Ez"],
                     state["Hx"], state["Hy"], state["Hz"], monitor_device,
                     monitor_count, history_device, step // stride)
-        cuda.synchronize()
+            reporter.submitted(step + 1)
+        reporter.finish()
     finally:
-        if progress_bar is not None:
-            progress_bar.close()
+        reporter.close()
 
     _copy_back(sim, state, mutable_names)
     if monitor_count:

@@ -30,7 +30,7 @@ cdef extern from *:
     typedef int (FDTD_CUDA_CALL *fdtd_nodes_fn)(void *, void **, size_t *);
     typedef int (FDTD_CUDA_CALL *fdtd_node_type_fn)(void *, int *);
     static fdtd_create_fn fdtd_stream_create;
-    static fdtd_one_fn fdtd_stream_destroy, fdtd_stream_sync;
+    static fdtd_one_fn fdtd_stream_destroy, fdtd_stream_query;
     static fdtd_one_fn fdtd_graph_destroy, fdtd_exec_destroy;
     static fdtd_begin_fn fdtd_begin;
     static fdtd_end_fn fdtd_end;
@@ -54,7 +54,7 @@ cdef extern from *:
         if (!fdtd_cuda_library) return -1;
         fdtd_stream_create = (fdtd_create_fn)fdtd_cuda_symbol("cuStreamCreate");
         fdtd_stream_destroy = (fdtd_one_fn)fdtd_cuda_symbol("cuStreamDestroy_v2");
-        fdtd_stream_sync = (fdtd_one_fn)fdtd_cuda_symbol("cuStreamSynchronize");
+        fdtd_stream_query = (fdtd_one_fn)fdtd_cuda_symbol("cuStreamQuery");
         fdtd_begin = (fdtd_begin_fn)fdtd_cuda_symbol("cuStreamBeginCapture");
         fdtd_end = (fdtd_end_fn)fdtd_cuda_symbol("cuStreamEndCapture");
         fdtd_instantiate = (fdtd_instantiate_fn)fdtd_cuda_symbol("cuGraphInstantiateWithFlags");
@@ -67,7 +67,7 @@ cdef extern from *:
         fdtd_event_destroy = (fdtd_one_fn)fdtd_cuda_symbol("cuEventDestroy_v2");
         fdtd_event_query = (fdtd_one_fn)fdtd_cuda_symbol("cuEventQuery");
         fdtd_event_record = (fdtd_launch_fn)fdtd_cuda_symbol("cuEventRecord");
-        if (!fdtd_stream_create || !fdtd_stream_destroy || !fdtd_stream_sync ||
+        if (!fdtd_stream_create || !fdtd_stream_destroy || !fdtd_stream_query ||
             !fdtd_begin || !fdtd_end || !fdtd_instantiate || !fdtd_graph_destroy ||
             !fdtd_exec_destroy || !fdtd_launch || !fdtd_nodes || !fdtd_node_type ||
             !fdtd_event_create || !fdtd_event_destroy || !fdtd_event_query ||
@@ -79,7 +79,7 @@ cdef extern from *:
     int fdtd_cuda_load()
     int fdtd_stream_create(void **, unsigned int) noexcept nogil
     int fdtd_stream_destroy(void *) noexcept nogil
-    int fdtd_stream_sync(void *) noexcept nogil
+    int fdtd_stream_query(void *) noexcept nogil
     int fdtd_begin(void *, int) noexcept nogil
     int fdtd_end(void *, void **) noexcept nogil
     int fdtd_instantiate(void **, void *, unsigned long long) noexcept nogil
@@ -99,6 +99,16 @@ cdef void _cuda_check(int result, str operation) except *:
         error = RuntimeError(f"CUDA graph {operation} failed (driver error {result}).")
         error.cuda_error_code = result
         raise error
+
+
+cdef int _wait_stream(void *stream) noexcept nogil:
+    """Poll on the CPU; never issue a CUDA synchronization command."""
+    cdef int result
+    while True:
+        result = fdtd_stream_query(stream)
+        if result != 600:  # CUDA_ERROR_NOT_READY
+            return result
+        fdtd_progress_sleep(NULL)
 
 
 def check_cuda_driver():
@@ -171,9 +181,8 @@ cdef class CudaGraph:
         if self._executable == NULL or self._event_count or self._progress_steps >= 0 or steps < 0:
             raise ValueError('Progress requires a ready graph and nonnegative steps; prepare once.')
         cdef Py_ssize_t count, index
-        # Event records are relatively costly under WDDM. Bound their count and
-        # amortize each over at least 1024 graph launches, even for short runs.
-        self._progress_chunk = max(1024, steps // 128 + (steps % 128 != 0))
+        # Bound marker allocation while retaining progress for shorter runs.
+        self._progress_chunk = max(1, steps // 128 + (steps % 128 != 0))
         count = steps // self._progress_chunk + (steps % self._progress_chunk != 0)
         for index in range(count):
             # CU_EVENT_DISABLE_TIMING: query completion without timestamp work.
@@ -229,18 +238,19 @@ cdef class CudaGraph:
                         progress_update(&reporter, min(completed * self._progress_chunk, steps), steps)
                         fdtd_progress_sleep(self._progress_timer)
             if result == 0:
-                result = fdtd_stream_sync(self._stream)
+                result = _wait_stream(self._stream)
             if progress:
                 progress_update(&reporter, steps if result == 0 else min(completed * self._progress_chunk, steps),
                                 steps, True)
-        _cuda_check(result, 'replay/synchronization')
+        _cuda_check(result, 'replay/completion query')
 
     def synchronize(self):
+        """Compatibility API: wait through nonblocking stream queries on the CPU."""
         cdef int result = 0
         if self._stream != NULL and not self._capturing:
             with nogil:
-                result = fdtd_stream_sync(self._stream)
-            _cuda_check(result, 'synchronization')
+                result = _wait_stream(self._stream)
+            _cuda_check(result, 'completion query')
 
     cdef void _close(self) noexcept nogil:
         cdef Py_ssize_t index
@@ -248,7 +258,7 @@ cdef class CudaGraph:
             fdtd_end(self._stream, &self._graph)
             self._capturing = False
         if self._stream != NULL:
-            fdtd_stream_sync(self._stream)
+            _wait_stream(self._stream)
         for index in range(self._event_count):
             fdtd_event_destroy(self._events[index])
         self._event_count = 0
