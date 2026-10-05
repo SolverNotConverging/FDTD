@@ -1,238 +1,76 @@
 # FDTD
 
 Finite-Difference Time-Domain solvers for computational electromagnetics.
-This project has two deliberately separate solver families: general-purpose 
-Cartesian electromagnetics and dedicated curved-spacetime light propagation. 
-Both families provide Cython and Numba-CUDA acceleration and a portable NumPy
-reference. Cartesian 2D acceleration is strict: explicitly select the reference
-when compiled execution is unavailable. The families' physical models,
-coordinates, units, and APIs are different.
+The `main` branch provides the established Cartesian 1D, 2D Ez, 2D Hz, and 3D
+solvers with their stable top-level Python imports.
 
 ## Choose a solver
 
-### Native modelling and inspection application
+| Solver | Public import | Documentation |
+|---|---|---|
+| 1D: Ey, Hx | `from FDTD_1D import FDTD_1D` | [1D guide](FDTD_1D/README.md) |
+| 2D TMz: Ez, Hx, Hy | `from FDTD_2D_Ez import FDTD_2D_Ez` | [Ez guide](FDTD_2D_Ez/README.md) |
+| 2D TEz: Hz, Ex, Ey | `from FDTD_2D_Hz import FDTD_2D_Hz` | [Hz guide](FDTD_2D_Hz/README.md) |
+| 3D: all six components | `from FDTD_3D import FDTD_3D` | [3D guide](FDTD_3D/README.md) |
 
-`gui/` contains **FDTD Studio**, a C++17 Qt/VTK desktop application for geometry,
-materials, matched/lumped ports, simulation control, conformal field inspection,
-S-parameter plots and closed-NTFF far fields. The existing solver runs in a
-separate Python process. See [GUI build and usage](gui/README.md).
+The Cartesian solvers support material-first geometry, anisotropy and loss,
+Debye/Drude/Lorentz dispersion, PEC/PMC boundaries, sources, monitors, and
+scattering analysis. Ez and Hz use CPML and conformal PEC cut cells.
+
+The separate [Schwarzschild GR solver](FDTD_2D_GR/README.md) remains available
+through `from FDTD_2D_GR import FDTD_2D_GR`. It uses geometric units and a
+dedicated polar API. The earlier UPML Ez implementation is retained under
+[legacy](legacy/README.md).
+
+## Install and build
+
+Run from the repository root:
 
 ```powershell
-.\gui\build\fdtd-studio.exe
-```
-
-### Geometry-first nonuniform 2D reference
-
-`FDTD_2D.FDTD2D` combines TE/TM, ranked geometry-driven nonuniform meshing,
-split thin PEC and transmissive SIBC sheets, conformal boundaries with connected
-cell enlargement and reported staircase fallback, infinite-SIBC PMC, lumped
-and tracked broadband waveguide ports with matched virtual guides, complete
-mixed-port S matrices, automatic object-based domains and CPML, closed NTFF,
-plane-wave TF/SF, and field/DFT convergence stopping. It is a new CPU reference implementation
-with explicit material, port-plane and PML restrictions. See
-[general 2D documentation](doc/general_2d.md) for examples and validation scope.
-
-```bash
-python -m pip install -r requirements-general-2d.txt
-python -m FDTD_2D.example_general
-python -m FDTD_2D.example_waveguide
-python -m FDTD_2D.example_scattering
-```
-
-### Conventional Cartesian material FDTD
-
-These solvers model user-defined materials, geometry, sources, boundaries, and
-monitors in one, two, or three spatial dimensions. They use SI units and
-Cartesian Yee grids, with support for anisotropy, electric and magnetic loss,
-Debye/Drude/Lorentz dispersion, PEC/PMC geometry, CFS-CPML, power spectra, and
-near-field-to-far-field transforms.
-
-| Solver | Polarization and fields | Documentation |
-|---|---|---|
-| 1D | `Ey`, `Hx` | [FDTD_1D/README.rst](FDTD_1D/README.rst) |
-| 2D TMz | `Ez`, `Hx`, `Hy` | [FDTD_2D_Ez/README.rst](FDTD_2D_Ez/README.rst) |
-| 2D TEz | `Hz`, `Ex`, `Ey` | [FDTD_2D_Hz/README.rst](FDTD_2D_Hz/README.rst) |
-| 3D | `Ex`, `Ey`, `Ez`, `Hx`, `Hy`, `Hz` | [FDTD_3D/README.rst](FDTD_3D/README.rst) |
-
-### Schwarzschild curved-spacetime light solver
-
-`FDTD_2D_GR` is a purpose-built polar TE solver for light on the equatorial
-plane of a fixed, non-rotating Schwarzschild black hole. It uses geometric
-units (`G=c=1`), evolves `Er`, `Ephi`, and `Hz` through the prescribed GR
-optical medium, and has its own orbiting-packet, radial-sponge, diagnostics,
-and animation API. It does not use the Cartesian material/geometry/source
-workflow above. See [FDTD_2D_GR/README.rst](FDTD_2D_GR/README.rst) for its
-physical scope and limitations.
-
-## Quick starts
-
-### Conventional Cartesian example
-
-```python
-from FDTD_3D import FDTD_3D
-
-sim = FDTD_3D(
-    x_range=20e-3, y_range=20e-3, z_range=20e-3,
-    Nx=40, Ny=40, Nz=40, f_min=8e9, f_max=12e9, Nt=600,
-)
-sim.config("cpu")
-sim.add_PML(6)
-
-glass = sim.add_material("glass", epsilon_r=4.0, sigma_e=1e-4)
-sim.add_block(glass, x=(5e-3, 9e-3), y=(5e-3, 15e-3), z=(8e-3, 12e-3))
-sim.add_sphere("PEC", center=(13e-3, 10e-3, 10e-3), radius=1.5e-3)
-
-sim.add_source("plane", x=(10, 30), y=(10, 30), z=8, polarization="x")
-monitor = sim.add_plane_monitor("z", position=30, index=1)
-sim.run(record_stride=2)
-sim.plot_plane_monitor(monitor, component="Ex", time_index=-1)
-```
-
-The Cartesian solvers follow the same material-first pattern:
-
-```python
-material = sim.add_material(
-    "lossy_dielectric",
-    epsilon_r=(2.5, 2.5, 3.0),
-    mu_r=1.0,
-    sigma_e=0.02,
-    sigma_m=0.0,
-)
-```
-
-Here `epsilon_r` is the instantaneous (high-frequency) permittivity. Optional
-dispersive poles may be combined and repeated:
-
-```python
-dispersive = sim.add_material(
-    "dispersive",
-    epsilon_r=2.0,
-    debye={"delta_epsilon": 1.5, "tau": 8e-12},
-    drude={"omega_p": 2.0e12, "gamma": 8.0e10},
-    lorentz=[
-        {"delta_epsilon": 0.8, "omega_0": 3.0e12, "gamma": 6.0e10},
-        {"delta_epsilon": 0.2, "omega_0": 5.0e12, "gamma": 9.0e10},
-    ],
-)
-```
-
-`omega_p`, `omega_0`, and `gamma` are angular frequencies in radians per
-second; `tau` is in seconds. Pole parameters can also be Cartesian triples.
-
-`vacuum`, `PEC`, and `PMC` are predefined.
-
-### PEC cut cells in the Cartesian 2D solvers
-
-`FDTD_2D_Ez` and `FDTD_2D_Hz` retain subcell geometry for PEC rectangles,
-circles, and triangles. The PEC-free cell areas and edge lengths are sampled at
-three times the solver's `subpixel` resolution (or a larger per-shape override).
-TEz uses the open-edge lengths
-in Faraday's circulation; TMz uses the open portions of the segments between
-`Ez` nodes. Small cut cells or segments share their update with connected fluid
-neighbors, so the ordinary Cartesian time step can be used without shrinking
-it to the smallest PEC sliver. An isolated sliver with no fluid neighbor raises
-an error when the shape is added.
-
-Material interfaces still use the existing subpixel averaging. PMC remains
-cell-based. Both `config("cpu")` and `config("gpu")` run the cut-cell updates in
-their native time loops, including enlarged-cell transfers. As with other
-accelerated 2D runs, build the Cython extension before selecting either
-backend. Grid-aligned PEC regions retain their original Cartesian fast path.
-
-### Schwarzschild GR example
-
-```python
-from FDTD_2D_GR import FDTD_2D_GR
-
-sim = FDTD_2D_GR(
-    rho_min=0.55, rho_max=10.0, Nr=320, Nphi=640,
-).config("cpu")
-sim.initialize_orbiting_packet(
-    azimuthal_mode=20, radial_width=0.35, angular_width=0.32,
-)
-history = sim.run(
-    duration=0.5 * sim.photon_orbit_period,
-    record_stride=8,
-)
-sim.plot_snapshot(log_scale=True)
-sim.plot_diagnostics(history)
-```
-
-This is fixed-background Schwarzschild wave propagation rather than a material
-scattering model. The finite packet follows the unstable photon-orbit region
-before separating into captured and escaping components.
-
-## Build optional Cython kernels
-
-From the project root:
-
-```bash
+python -m pip install -r requirements-dev.txt
 python setup_cython.py build_ext --inplace
 ```
 
-The build requires Cython, NumPy, setuptools, and a supported C compiler.
-The Cartesian 2D/3D solvers and the Schwarzschild solver have Numba-CUDA
-backends that additionally require a working CUDA runtime. Select one with
-`sim.config("gpu")`. Cartesian Ez/Hz runs require the full Cython extension for
-both CPU stepping and GPU graph replay; missing acceleration raises an error.
-`config("python")` selects their reference loops explicitly. Other solver
-families retain their existing fallback behavior. The GR Cython kernel is
-specialized for complex128 fields.
+The Cython build requires a supported C compiler. Cartesian Ez/Hz
+`config("cpu")` and hardware `config("gpu")` require the compiled 2D runtime.
+Use `config("python")` explicitly for their reference loops. GPU execution
+additionally requires a working CUDA runtime.
 
-Ez/Hz CPU runs execute the entire time loop in Cython under `nogil`. Their GPU
-runs execute Numba CUDA kernels through native CUDA graph replay, including
-Debye/Drude/Lorentz dispersion, sources, PML, monitors, and histories. No Python
-dispatch, buffer allocation, or host/device transfer occurs during accelerated
-stepping. See [the compiled 2D runtime guide](doc/compiled_2d.md).
+See [shared conventions](FDTD_common/docs/general.md) and the
+[compiled 2D runtime guide](FDTD_common/docs/compiled_2d/compiled_2d.md).
 
-## Run tests
+## Examples and tests
 
-```bash
-python -m unittest discover -s tests -v
+```powershell
+python -m FDTD_1D.examples.FDTD_1D_example
+python -m FDTD_2D_Ez.examples.Example_1_Simple_Source
+python -m FDTD_2D_Hz.examples.Example_1_Simple_Source
+python -m FDTD_3D.examples.Example_3D --no-show
+
+$env:MPLBACKEND = 'Agg'
+python -m unittest discover -s tests -t .
 ```
 
-All unit and CUDA-simulator tests live under [`tests/`](tests/). The explicit
-start directory also works when the test package is invoked from tools that do
-not recursively discover packages by default.
+Each solver contains its own `docs/` and `examples/`. Tests are organized under
+[tests](tests/README.md), and benchmark scripts and recorded reports under
+[benchmarks](benchmarks/README.md). Generated results are kept in ignored
+`output/` directories. Supplied lecture PDFs are indexed under
+[reference literature](FDTD_common/docs/references/README.md).
 
-Build the extensions before testing accelerated 2D execution. Set
-`FDTD_TEST_REAL_CUDA=1` to include real-GPU graph, transfer, and cleanup tests.
+## Development branch
 
-## Examples
+The geometry-first general `FDTD_2D` solver and Qt/VTK FDTD Studio GUI are
+maintained on the separate `dev` branch. The established solvers above are also
+available there.
 
-### Conventional Cartesian examples
-
-```bash
-python FDTD_1D/FDTD_1D_example.py
-python FDTD_2D_Ez/Example_1_Simple_Source.py
-python FDTD_2D_Hz/Example_1_Simple_Source.py
-python FDTD_3D/Example_3D.py
-python FDTD_3D/Example_3D_GPU.py
+```powershell
+git switch dev
+python -m pip install -r FDTD_2D/requirements.txt
+python -m FDTD_2D.examples.example_general
 ```
 
-Both 3D examples default to a `100 × 100 × 100` grid. They share the same
-scattering model and post-processing so CPU and GPU output can be compared
-directly. Use `--steps`, `--record-stride`, `--output-dir`, `--animate`, and
-`--no-show` to control a run; `--cells` may increase, but not reduce, the grid.
-
-The `FDTD_2D_Ez_Legacy` directory is retained for reference. New work should
-use `FDTD_2D_Ez` or `FDTD_2D_Hz`.
-
-### Schwarzschild GR example
-
-```bash
-python FDTD_2D_GR/Example_Photon_Orbit.py
-```
-
-This is a no-argument Python API script. Edit its constants directly;
-`BACKEND` selects NumPy, Cython, or CUDA, and `SAVE_ANIMATION = True` writes
-`photon_packet.mp4` with FFmpeg after the simulation finishes.
-
-## Further documentation
-
-Start with [GENERAL.md](GENERAL.md) for installation, units, stability,
-backend selection, and conventions shared where applicable. The supplied CPML
-and scattering-analysis literature is indexed in [doc/README.md](doc/README.md).
+On `dev`, see `FDTD_2D/README.md` and `FDTD_2D/gui/README.md` for the general
+solver and GUI. Return to the production checkout with `git switch main`.
 
 ## License
 

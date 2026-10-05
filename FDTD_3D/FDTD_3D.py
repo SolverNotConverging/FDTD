@@ -702,7 +702,7 @@ class FDTD_3D:
             state is not None and state.dispersive
             for state in (self.ade_Ex, self.ade_Ey, self.ade_Ez))
         if self.backend == "numba_cuda" and not has_dispersion:
-            from FDTD_common.cuda_3d import run_gpu
+            from FDTD_3D.cuda import run_gpu
             self._last_run_backend = "numba_cuda"
             return run_gpu(self, steps, stride, progress, progress_desc)
         if has_dispersion and self.backend in {"cython", "numba_cuda"}:

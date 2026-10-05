@@ -81,8 +81,8 @@ Thumbs.db
 .gui-tools/
 .gui-deps/
 aqtinstall.log
-gui/build/
-gui/runs/
+FDTD_2D/gui/build/
+FDTD_2D/gui/runs/
 output/
 *.npz
 *.h5

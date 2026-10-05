@@ -1,0 +1,265 @@
+FDTD 2D TMz solver
+==================
+
+``FDTD_2D_Ez`` solves the two-dimensional TMz polarization with ``Ez``,
+``Hx``, and ``Hy`` on their exact Yee locations. It supports named lossy
+materials, subpixel geometry, PEC/PMC regions, CFS-CPML, periodic boundaries,
+several source types, line monitors, power analysis, 2D NF2FF, animation,
+pickle state persistence, and Python/Cython/Numba-CUDA backends.
+
+Import and construction
+-----------------------
+
+.. code-block:: python
+
+   from FDTD_2D_Ez import FDTD_2D_Ez, Material
+
+   sim = FDTD_2D_Ez(
+       x_range=14e-3,
+       y_range=14e-3,
+       Nx=140,
+       Ny=140,
+       f_min=50e9,
+       f_max=100e9,
+       Nt=4000,
+       dt=None,
+       subpixel=16,
+   )
+   sim.config("cpu")
+
+``suggest_dx_dt`` provides a square-cell recommendation and stable time step.
+
+Yee grid and material mapping
+-----------------------------
+
+The field arrays are:
+
+* ``Ez (Nx + 1, Ny + 1)`` on nodes;
+* ``Hx (Nx + 1, Ny)`` on x-directed edges;
+* ``Hy (Nx, Ny + 1)`` on y-directed edges.
+
+TMz uses the z entries of ``epsilon_r`` and ``sigma_e`` and the x/y entries of
+``mu_r`` and ``sigma_m``. Cell material is averaged onto the corresponding
+Yee locations before coefficients are initialized.
+
+Materials and geometry
+----------------------
+
+.. code-block:: python
+
+   slab = sim.add_material(
+       "slab",
+       epsilon_r=(3.0, 3.0, 4.0),
+       mu_r=(1.1, 1.2, 1.0),
+       sigma_e=(0.0, 0.0, 0.02),
+       sigma_m=(0.001, 0.002, 0.0),
+   )
+
+   sim.add_rectangle(
+       material=slab,
+       x_position=(4e-3, 6e-3),
+       y_position=(3e-3, 10e-3),
+   )
+   sim.add_circle(
+       material="slab", center=(9e-3, 7e-3), radius=1e-3,
+   )
+   sim.add_triangle(
+       material="PEC",
+       vertices=((2e-3, 2e-3), (3e-3, 2e-3), (2.5e-3, 4e-3)),
+   )
+
+Positions may be floating-point metres or integer grid-edge indices. Ordinary
+shapes use subpixel area sampling. PEC and PMC use exact conductor masks and do
+not rely on extreme material values. Direct ``ER``, ``MR``, ``sigma_e``, and
+``sigma_m`` shape arguments remain available for older scripts.
+
+Electric dispersion
+-------------------
+
+TMz consumes the z-directed entries of Debye, Drude, and Lorentz poles. Their
+strengths are vertex-averaged to ``Ez`` while each distinct pole keeps its own
+ADE history:
+
+.. code-block:: python
+
+   dispersive = sim.add_material(
+       "dispersive",
+       epsilon_r=2.0,
+       debye={"delta_epsilon": 1.2, "tau": 10e-12},
+       drude={"omega_p": 2e12, "gamma": 5e10},
+       lorentz=[
+           {"delta_epsilon": 0.7, "omega_0": 3e12, "gamma": 4e10},
+           {"delta_epsilon": 0.2, "omega_0": 5e12, "gamma": 8e10},
+       ],
+   )
+
+Here ``epsilon_r`` is the high-frequency value. All frequencies in a pole are
+angular frequencies in radians per second.
+Point and line-soft displacement sources participate in the coupled ADE solve.
+The built-in waveguide/modal eigenproblems use ``epsilon_inf`` rather than
+``epsilon(omega)``; keep modal launch cross-sections nondispersive or supply
+externally calculated modal data.
+
+CFS-CPML and periodic boundaries
+--------------------------------
+
+.. code-block:: python
+
+   sim.add_PML(
+       pml_width=15,
+       order=3,
+       direction="xy",
+       kappa_max=7,
+       alpha_max=0.025,
+       R0=1e-8,
+   )
+
+The solver uses unsplit complex-frequency-shifted convolutional PML with
+recursive auxiliary fields. The automatically selected peak conductivity uses
+the standard natural-log expression
+
+.. math::
+
+   \sigma_{max}=-\frac{(m+1)\ln(R_0)}{2\eta_0L}.
+
+Selected directions receive matched PMLs on both lower and upper boundaries.
+Set ``sim.periodic`` to ``"x"``, ``"y"``, or ``"xy"`` when periodic curl
+boundaries are required. Do not combine a periodic direction with a PML in the
+same direction.
+
+Sources
+-------
+
+``add_source`` accepts:
+
+* ``point`` -- soft point excitation;
+* ``line-soft`` -- soft horizontal or vertical line;
+* ``sftf`` -- angled total-field/scattered-field rectangle;
+* ``waveguide-x`` -- modal port propagating toward +x;
+* ``waveguide-y`` -- modal port propagating toward +y.
+
+Examples:
+
+.. code-block:: python
+
+   sim.add_source("point", x=7e-3, y=4e-3, amplitude=1.0, is_show=False)
+   sim.add_source("line-soft", x=3e-3, y=(4e-3, 10e-3), is_show=False)
+   sim.add_source(
+       "sftf", x=(25, 115), y=(25, 115),
+       angle=0.35, is_show=False,
+   )
+   sim.add_source(
+       "waveguide-x", x=20, y=(20, 80),
+       broadband=True,
+       frequency_mode_pairs=[
+           (60e9, 0),
+           (70e9, 0),
+           (80e9, 1),
+           (90e9, 1),
+       ],
+       modes_to_show=3,
+       is_show=True,
+   )
+
+The TF/SF source requires square cells. Waveguide sources solve a reduced
+staggered FDFD eigenproblem using the local material and conductor masks.
+For ``broadband=True``, the supplied frequency/index pairs are modal anchors.
+The paired index explicitly selects the mode at each anchor. Selected anchor
+fields are phase-aligned, then the electric field, magnetic field, and
+propagation constant are linearly interpolated onto every real-FFT bin inside
+the anchor interval. The dense source spectrum weights those interpolated
+fields before inverse-FFT synthesis. The magnetic spectrum includes both the
+half-time step and frequency-dependent half-cell propagation phase. At least
+two unique positive frequencies are required, and a selected mode with
+non-positive ``n_eff`` is rejected as cut off. The mode preview uses frequency
+rows and mode-index columns. Mode indices are used exactly as supplied; this
+path does not perform automatic cross-frequency mode selection or tracking.
+
+Line monitors and power
+-----------------------
+
+.. code-block:: python
+
+   monitor = sim.add_line_monitor(x=110, y=(20, 120), index=10)
+   sim.run(record_stride=1, is_include_history=False)
+
+   frequencies = [60e9, 80e9, 100e9]
+   power = sim.power_spectrum(monitor, frequencies, source_index=0)
+   sim.plot_power_spectrum(power, db=True)
+
+Monitor IDs are stable non-negative integers. ``power_spectrum`` evaluates a
+direct DFT at the requested frequencies and integrates signed Poynting flux
+along the complete line. FFT convenience methods are also available:
+``calculate_line_monitor_power_fft``, ``calculate_source_power_fft``, and
+``plot_fft_results``.
+
+NF2FF
+-----
+
+Create line monitors on the desired equivalence contour and pass their IDs:
+
+.. code-block:: python
+
+   farfield = sim.NF2FF(
+       top=10, bottom=20, left=30, right=40,
+       freqs=[80e9], nphi=361, src_index=0,
+   )
+   sim.show_FF(farfield, freq_idx=0, component="Etheta", db=True)
+
+Any side may be ``None`` if at least one monitor is supplied. For a physically
+closed radiation transform, place the contour in homogeneous material,
+outside all scatterers and inside the PML.
+
+Run, animation, and persistence
+-------------------------------
+
+``run(progress=True)`` enables a throttled terminal progress bar (native for
+CPU/GPU execution). Progress is off by default. Set ``is_include_history=False`` when full
+field animation history is unnecessary. Otherwise:
+
+.. code-block:: python
+
+   sim.run(record_stride=2, progress=True)
+   sim.show_animation(fps=60, dynamic_clim=True)
+
+The full simulator state can be saved and restored with pickle:
+
+.. code-block:: python
+
+   sim.save("tmz_run.pkl", include_histories=True)
+   restored = FDTD_2D_Ez.load("tmz_run.pkl")
+
+Live Debye, Drude, and Lorentz polarization/velocity histories are included,
+so a restored dispersive run continues from the saved constitutive state.
+
+Backends
+--------
+
+``config("cpu")`` runs the complete time loop in Cython under ``nogil``.
+``config("gpu")`` runs Numba CUDA kernels through a Cython CUDA graph driver.
+Both accelerated backends include Debye/Drude/Lorentz dispersion, CPML, lossy
+materials, conductor masks, all supported sources, monitors, and histories.
+No Python dispatch or allocation occurs during accelerated stepping, and GPU
+arrays remain resident until completion with no host/device transfers.
+
+Build the extension with ``python setup_cython.py build_ext --inplace``.
+Unavailable acceleration raises an error; ``config("python")`` explicitly
+selects the NumPy reference. Individual curl/update methods require reference
+mode. Construction and checkpoint loading remain available without a build.
+
+Use ``is_include_history=False`` with line monitors when memory is limited.
+Full histories and source tables must fit in GPU memory; preflight reports
+oversized requests before advancing fields. Increase ``record_stride`` or
+reduce monitor windows to use less memory. There is no automatic streaming.
+
+``_runtime_stats`` reports setup, stepping, download, and post-processing time.
+``_gpu_transfer_stats`` reports measured runtime operations and recording size.
+The CUDA simulator is a correctness harness and reports its Python launches;
+real CUDA graph replay uses no Python timestep calls. See
+``FDTD_common/docs/compiled_2d/compiled_2d.md`` for architecture, tests, and benchmark instructions.
+
+Examples
+--------
+
+This directory contains simple-source, TF/SF, single-frequency and broadband
+waveguide, far-field, flux, and GPU examples.

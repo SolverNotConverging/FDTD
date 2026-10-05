@@ -1,0 +1,7 @@
+# Dependencies for all solver families and examples.
+numpy>=1.24
+scipy>=1.10
+matplotlib
+tqdm
+numba
+h5py
