@@ -1,0 +1,19 @@
+{
+  "version": 1, "units": "mm", "title": "High-index dielectric, SIBC tip and thin film",
+  "background": {"epsilon_r": 1, "mu_r": 1},
+  "objects": [
+    {"kind": "rectangle", "name": "high_index", "x": 16, "y": 12, "width": 8, "height": 6, "rank": 20, "material": {"type": "dielectric", "epsilon_r": 9, "mu_r": 1}},
+    {"kind": "polygon", "name": "metal_tip", "vertices": [[11,10],[14,15],[11,20]], "rank": 40, "material": {"type": "SIBC", "model": "conductor", "conductivity": 58000000}},
+    {"kind": "sheet", "name": "resistive_film", "start": [27,10], "end": [30,20], "rank": 30, "material": {"type": "film", "resistance": 75}}
+  ],
+  "ports": [
+    {"kind": "lumped", "name": "feed", "start": [15,15], "rank": 100, "resistance": 50, "depth_mm": 1},
+    {"kind": "lumped", "name": "receive", "start": [26,15], "rank": 100, "resistance": 50, "depth_mm": 1}
+  ],
+  "sources": [], "excitations": [{"name": "feed", "mode": 0, "amplitude": 1}],
+  "settings": {"polarization": "TM", "study": "sparameters", "f_min_ghz": 5, "f_max_ghz": 15, "frequency_count": 31,
+    "max_step_mm": 2, "min_step_mm": 0.25, "min_dt_ps": 0.2, "cells_per_wavelength": 20, "growth": 2,
+    "pml_cells": 8, "clearance_wavelengths": 0.25, "enlargement": 0.3, "fallback": true,
+    "max_time_ns": 4, "min_time_ns": 1, "pulse_ghz": 10, "pulse_width_ps": 80, "pulse_delay_ps": 0,
+    "field_tolerance": 0.00001, "dft_tolerance": 0.0001}
+}

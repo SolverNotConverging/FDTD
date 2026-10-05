@@ -1,0 +1,28 @@
+{
+  "version": 1, "units": "mm", "title": "Periodic slotted-guide leaky-wave antenna (2D)",
+  "background": {"epsilon_r": 1, "mu_r": 1},
+  "objects": [
+    {"kind":"rectangle","name":"ground","x":0,"y":-2,"width":100,"height":2,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_0","x":0,"y":7,"width":19,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_1","x":21,"y":7,"width":8,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_2","x":31,"y":7,"width":8,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_3","x":41,"y":7,"width":8,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_4","x":51,"y":7,"width":8,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_5","x":61,"y":7,"width":8,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_6","x":71,"y":7,"width":8,"height":0.5,"rank":60,"material":{"type":"PEC"}},
+    {"kind":"rectangle","name":"roof_7","x":81,"y":7,"width":19,"height":0.5,"rank":60,"material":{"type":"PEC"}}
+  ],
+  "ports": [
+    {"kind":"waveguide","name":"feed","axis":"x","position":8,"span":[0,7],"inward_normal":1,"modes":1,"rank":100,"depth_mm":1,"length_cells":32,"pml_cells":12,"clearance_cells":6},
+    {"kind":"waveguide","name":"termination","axis":"x","position":92,"span":[0,7],"inward_normal":-1,"modes":1,"rank":100,"depth_mm":1,"length_cells":32,"pml_cells":12,"clearance_cells":6}
+  ],
+  "sources": [], "excitations": [{"name":"feed","mode":0,"amplitude":1}],
+  "monitors": [
+    {"kind":"monitor","name":"aperture_and_radiation","x":9,"y":0,"width":82,"height":16,"frequencies_ghz":[28,32,36]}
+  ],
+  "settings": {"polarization":"TM","study":"sparameters","f_min_ghz":24,"f_max_ghz":40,"frequency_count":33,
+    "max_step_mm":1,"min_step_mm":0.25,"min_dt_ps":0,"cells_per_wavelength":12,"growth":2,
+    "pml_cells":10,"clearance_wavelengths":0.65,"enlargement":0.3,"fallback":true,
+    "max_time_ns":5,"min_time_ns":2.5,"pulse_ghz":32,"pulse_width_ps":150,"pulse_delay_ps":0,
+    "field_tolerance":0.000001,"dft_tolerance":0.00001}
+}

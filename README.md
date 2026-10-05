@@ -1,5 +1,7 @@
 # FDTD
 
+This is the `dev` branch. It includes the [general 2D solver](FDTD_2D/README.md) and [FDTD Studio GUI](FDTD_2D/gui/README.md), alongside the established solvers.
+
 Finite-Difference Time-Domain solvers for computational electromagnetics.
 The `main` branch provides the established Cartesian 1D, 2D Ez, 2D Hz, and 3D
 solvers with their stable top-level Python imports.
