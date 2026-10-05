@@ -1,5 +1,7 @@
 """Physical and structural checks for the geometry-first conformal reference."""
 import unittest
+import contextlib
+import io
 import numpy as np
 from scipy.sparse.csgraph import connected_components
 from FDTD_2D import (Scene, Material, Mesh, MeshPolicy, Anchor, FDTD2D, RunControl,
@@ -12,6 +14,23 @@ from FDTD_2D.ports import track_modes
 
 def uniform(n=12):
     return Mesh(np.linspace(0,.012,n+1),np.linspace(0,.012,n+1))
+
+
+class TerminalProgressTests(unittest.TestCase):
+    def test_default_display_and_quiet_run_preserve_fields(self):
+        sim=FDTD2D(Scene((0,.012),(0,.012)),mesh=uniform(3))
+        control=RunControl(3*sim.dt,check_steps=1)
+        initial=np.arange(sim.scalar.size,dtype=float)
+        terminal=io.StringIO()
+        with contextlib.redirect_stderr(terminal):
+            shown=sim.run(control,initial_scalar=initial)
+        self.assertIn("100%",terminal.getvalue())
+        terminal=io.StringIO()
+        with contextlib.redirect_stderr(terminal):
+            quiet=sim.run(control,initial_scalar=initial,progress=False)
+        self.assertEqual(terminal.getvalue(),"")
+        np.testing.assert_array_equal(shown.scalar,quiet.scalar)
+        np.testing.assert_array_equal(shown.vector,quiet.vector)
 
 
 class GeometryMeshTests(unittest.TestCase):

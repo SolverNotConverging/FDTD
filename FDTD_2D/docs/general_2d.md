@@ -27,6 +27,11 @@ The examples save compressed NumPy S-parameter data. Array ordering is
 `(port_name, mode_index)`. Lumped ports use mode index zero. Invalid bins remain
 NaN and are identified by `valid`, rather than being replaced by zeros.
 
+`run()` and `scattering()` show terminal progress by default. Pass
+`progress=False` to disable it. A callable `progress(info, scalar, vector)`
+receives read-only field views alongside the terminal display, including when
+the GUI uses the callback to report its own progress.
+
 ## Geometry before meshing
 
 ```python

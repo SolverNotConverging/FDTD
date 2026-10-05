@@ -247,6 +247,32 @@ class FDTD2D:
         return qtime,ptime
 
     def run(self,control,excitations=None,initial_scalar=None,initial_vector=None,probes=(),progress=None,field_monitors=()):
+        """Run with terminal progress; pass False to disable the display.
+
+        A callable progress(info, scalar, vector) also receives read-only field
+        views at check_steps and completion, and may raise to cancel the run.
+        """
+        if progress is False:
+            return self._run(control,excitations,initial_scalar,initial_vector,probes,None,field_monitors)
+        if not isinstance(control,RunControl):
+            control=RunControl(float(control))
+        steps=int(np.floor(control.max_time/self.dt+1e-12))
+        if steps < 1:
+            raise ValueError("max_time is shorter than one time step")
+        from tqdm import tqdm
+        with tqdm(total=steps,desc="General 2D FDTD",unit="step",
+                  mininterval=0.2,dynamic_ncols=True) as bar:
+            def report(info,q,p):
+                bar.update(info["step"]-bar.n)
+                if callable(progress):
+                    progress(info,q,p)
+            result=self._run(control,excitations,initial_scalar,initial_vector,probes,report,field_monitors)
+            if result.steps < steps:
+                bar.total=result.steps
+            bar.update(result.steps-bar.n)
+            return result
+
+    def _run(self,control,excitations=None,initial_scalar=None,initial_vector=None,probes=(),progress=None,field_monitors=()):
         """Run independently; optional progress(info, scalar, vector) receives read-only views.
 
         Callbacks run after check_steps and at completion and may raise to cancel
@@ -457,8 +483,8 @@ class FDTD2D:
             raise ValueError("A complete scattering study must independently drive every channel")
         runs=[]
         for index,channel in enumerate(channels):
-            callback=None
-            if progress is not None:
+            callback=False if progress is False else None
+            if callable(progress):
                 def callback(info,q,p,index=index,channel=channel):
                     progress(dict(info,run_index=index,run_count=len(channels),channel=channel),q,p)
             runs.append(self.run(control,{channel:waveform},progress=callback,field_monitors=field_monitors))
