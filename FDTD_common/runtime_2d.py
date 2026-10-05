@@ -451,7 +451,7 @@ def _run_gpu(sim, prepared, extension, progress=False):
         buffers.buffers.clear()
 
 
-def run(sim, polarization, record_stride=1, is_include_history=True, *, progress=False):
+def run(sim, polarization, record_stride=1, is_include_history=True, *, progress=True):
     select_backend(sim, sim.backend_requested)
     extension = compiled_extension()
     start = perf_counter()

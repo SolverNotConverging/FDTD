@@ -203,7 +203,7 @@ background material between the objects and the PML.
 Run, animation, and persistence
 -------------------------------
 
-``run(progress=True)`` enables a throttled terminal progress bar (native for
+``run()`` shows a throttled terminal progress bar by default (native for
 CPU/GPU execution). Progress is off by default; full histories are optional:
 
 .. code-block:: python

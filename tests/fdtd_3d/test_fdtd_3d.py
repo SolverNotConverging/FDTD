@@ -171,7 +171,7 @@ class TestPMLSourceAndMonitor(unittest.TestCase):
             def update(self,count): updates.append(("update",count))
             def close(self): updates.append(("closed",True))
         shown=make_case()
-        with patch("tqdm.auto.tqdm",ProgressBar):
+        with patch("tqdm.tqdm",ProgressBar):
             shown.run(record_stride=3,progress=True)
         self.assertEqual(sum(value for kind,value in updates if kind=="update"),8)
         self.assertIn(("closed",True),updates)

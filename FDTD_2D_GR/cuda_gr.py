@@ -308,7 +308,8 @@ def sync_to_host(sim) -> bool:
     state["Hz"].copy_to_host(sim.Hz)
     state["Er"].copy_to_host(sim.Er)
     state["Ephi"].copy_to_host(sim.Ephi)
-    cuda.synchronize()
+    # Default-stream copy_to_host calls above already complete their readback.
+    # An additional device-wide synchronization would unnecessarily stall work.
     state["host_dirty"] = False
     sim._gpu_host_dirty = False
     stats = sim._gpu_transfer_stats

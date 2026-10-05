@@ -23,10 +23,12 @@ def _waveform(source_id, time, dt, modes, amplitudes, t0, tw, frequencies):
         ratio = relative_time / width
         return amplitude * math.exp(-(ratio * ratio))
     if mode == 1:
-        period = 1.0 / max(frequency, 1e-30)
-        ramp_time = max(period, dt)
-        elapsed = max(relative_time, 0.0)
-        ramp = 1.0 - math.exp(-((elapsed / ramp_time) ** 3))
+        # Scalar expressions avoid CPU-only overloads in newer Numba releases.
+        period = 1.0 / (frequency if frequency > 1e-30 else 1e-30)
+        ramp_time = period if period > dt else dt
+        elapsed = relative_time if relative_time > 0.0 else 0.0
+        ratio = elapsed / ramp_time
+        ramp = 1.0 - math.exp(-(ratio * ratio * ratio))
         return amplitude * ramp * math.sin(2.0 * math.pi * frequency * relative_time)
     ratio = relative_time / width
     return (amplitude * math.sin(2.0 * math.pi * frequency * relative_time)

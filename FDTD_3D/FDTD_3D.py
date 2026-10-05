@@ -716,7 +716,7 @@ class FDTD_3D:
         monitor_coords, history, record_steps = self._compile_monitors(steps, stride)
         if progress:
             try:
-                from tqdm.auto import tqdm
+                from tqdm import tqdm
             except ImportError as exc:
                 raise ImportError("Simulation progress display requires tqdm.") from exc
             progress_bar = tqdm(total=steps, desc=str(progress_desc), unit="step", dynamic_ncols=True)

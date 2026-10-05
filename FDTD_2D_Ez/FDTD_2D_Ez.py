@@ -1788,8 +1788,8 @@ class FDTD_2D_Ez:
 
     # ---------- main loop ----------
 
-    def run(self, record_stride=1, is_include_history=True, *, progress=False):
-        """Run the simulation; progress=True shows throttled terminal step progress."""
+    def run(self, record_stride=1, is_include_history=True, *, progress=True):
+        """Run with terminal progress by default; progress=False disables it."""
         if self.backend != "python":
             run_compiled(self, "tm", record_stride, is_include_history, progress=progress)
             return

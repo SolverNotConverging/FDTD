@@ -46,7 +46,10 @@ class TestDeviceResidentCuda3D(unittest.TestCase):
             gpu = make_case("gpu")
             assert gpu.backend == "numba_cuda"
             reference.run(record_stride=2, progress=False)
-            gpu.run(record_stride=2, progress=False)
+            from unittest.mock import patch
+            from numba import cuda
+            with patch.object(cuda, 'synchronize', side_effect=AssertionError('GPU progress must not synchronize')):
+                gpu.run(record_stride=2)
 
             names = (
                 "Ex", "Ey", "Ez", "Hx", "Hy", "Hz",
